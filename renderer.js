@@ -91,6 +91,7 @@
       if (p.launching) classes.push('launching')
       if (p.suspended && !p.launching) classes.push('suspended')
       if (isRunning && !p.launching) classes.push('running')
+      if (p._redHighlight) classes.push('red-highlight')
       const tooltip = p.name
         + (p.envId ? ` (envId: ${p.envId})` : '')
         + (p.launching ? ' — запуск...' : (isRunning ? ' — запущен' : ' — остановлен'))
@@ -98,7 +99,16 @@
         class: classes.join(' '),
         title: tooltip,
         onclick: (e) => { if (!e.target.classList.contains('close')) selectProfile(p.id) },
-        oncontextmenu: (e) => { e.preventDefault(); showProfileMenu(p, e) }
+        oncontextmenu: (e) => {
+          e.preventDefault()
+          // Toggle red highlight on right-click; show menu only if not toggling
+          const wasRed = p._redHighlight
+          p._redHighlight = !p._redHighlight
+          // Re-render to update color immediately, then show menu only on non-highlight click
+          renderProfiles()
+          if (!wasRed) return // first right-click just marks red, no menu
+          showProfileMenu(p, e)
+        }
       },
         el('span', { class: 'pnum' }, String(num)),
         p.launching ? el('span', { class: 'spin', title: 'Запуск...' }) : null,
@@ -230,6 +240,11 @@
   }
 
   function showProfileMenu(p, evt) {
+    // Visual feedback: soft red highlight on right-click
+    const allTabs = document.querySelectorAll('.profile-tab')
+    allTabs.forEach(t => t.classList.remove('ctx-active'))
+    if (evt && evt.currentTarget) evt.currentTarget.classList.add('ctx-active')
+
     const isML = !!p.envId
     const menu = isML
       ? `Профиль ML: ${p.name}\n\n1 — Удалить навсегда\n2 — Переименовать\n3 — Пересинхронизировать cookies\n4 — Перезапустить ML\n5 — Закрыть в ML\n6 — Отмена`
@@ -861,29 +876,15 @@
 
         // Проверяем попал ли drop в зону WebContentsView
         const panelW = state.filesPanelVisible ? state.filesPanelWidth : 0
-        const chromeH = 108 // TITLEBAR(36) + TOOLBAR(40) + TABBAR(32)
+        const chromeH = 96 // TITLEBAR(32) + TOOLBAR(36) + TABBAR(28)
         if (e.clientX <= panelW || e.clientY <= chromeH) return
         if (!state.activeProfileId) return
 
         for (const filePath of paths) {
-          let text
-          if (draggingIsFolder) {
-            // Папка — вставляем путь
-            text = filePath
-          } else {
-            // Файл — читаем содержимое
-            const res = await api.fsReadFile(filePath)
-            if (res && res.ok) {
-              text = res.content
-            } else {
-              // Если не удалось прочитать (бинарный файл и т.д.) — вставляем путь
-              text = filePath
-            }
-          }
-          // Вставляем по координатам курсора в webview.
-          // pasteAtCoords симулирует mouseClick чтобы перевести фокус,
-          // потом вставляет текст через executeJavaScript — надёжнее чем pastePlainText
-          // который вставляет только в document.activeElement (фокус был в файловой панели).
+          // Always insert the file NAME (basename), not the full content.
+          // Full content insert only if user explicitly opens via context menu.
+          const fileName = filePath.split(/[\\/]/).pop() || filePath
+          const text = fileName
           const viewX = Math.round(e.clientX - panelW)
           const viewY = Math.round(e.clientY - chromeH)
           await api.pasteAtCoords(text, viewX, viewY)
@@ -1329,6 +1330,11 @@
         else if (e.key === 'e' || e.key === 'E') {
           e.preventDefault()
           const bar = $('address-bar'); if (bar) { bar.focus(); bar.select() }
+        }
+        else if (e.key === 'w' || e.key === 'W') {
+          // Ctrl+W closes only the active browser tab, never the Electron window
+          e.preventDefault()
+          if (state.activeTabId) closeTab(state.activeTabId)
         }
       } else if (e.key === 'Escape') {
         if ($('ml-modal').classList.contains('visible')) { hideMLModal(); return }

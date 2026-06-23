@@ -46,14 +46,14 @@
       top: 0;
       left: 0;
       right: 0;
-      height: 36px;
+      height: 32px;
       background: #0d0d0d;
       display: flex;
       align-items: center;
       -webkit-app-region: drag;
-      padding: 0 4px;
+      padding: 0 2px;
       z-index: 100;
-      border-bottom: 1px solid #2a2a2a;
+      border-bottom: 1px solid #1e1e1e;
     }
 
     #titlebar>* {
@@ -102,14 +102,14 @@
     .profile-tab {
       display: flex;
       align-items: center;
-      gap: 5px;
-      padding: 5px 9px;
-      border-radius: 6px;
-      background: #1f1f1f;
-      color: #ccc;
-      min-width: 32px;
+      gap: 4px;
+      padding: 3px 7px;
+      border-radius: 5px;
+      background: #1a1a1a;
+      color: #bbb;
+      min-width: 28px;
       cursor: pointer;
-      height: 28px;
+      height: 24px;
       flex-shrink: 0;
       justify-content: center;
       position: relative;
@@ -193,13 +193,13 @@
     }
 
     .wc-btn {
-      width: 32px;
-      height: 32px;
+      width: 28px;
+      height: 28px;
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #ccc;
-      font-size: 14px;
+      color: #999;
+      font-size: 13px;
     }
 
     .wc-btn:hover {
@@ -214,17 +214,17 @@
 
     #toolbar {
       position: fixed;
-      top: 36px;
+      top: 32px;
       left: 0;
       right: 0;
-      height: 40px;
-      background: #1a1a1a;
+      height: 36px;
+      background: #111;
       display: flex;
       align-items: center;
-      gap: 4px;
-      padding: 0 6px;
+      gap: 3px;
+      padding: 0 4px;
       z-index: 90;
-      border-bottom: 1px solid #2a2a2a;
+      border-bottom: 1px solid #1e1e1e;
       transition: left 0.05s linear;
     }
 
@@ -233,14 +233,14 @@
     }
 
     .nav-btn {
-      width: 32px;
-      height: 32px;
+      width: 28px;
+      height: 28px;
       display: flex;
       align-items: center;
       justify-content: center;
       border-radius: 4px;
-      color: #ccc;
-      font-size: 15px;
+      color: #aaa;
+      font-size: 14px;
     }
 
     .nav-btn:hover:not(:disabled) {
@@ -253,15 +253,22 @@
       cursor: default;
     }
 
+    .profile-tab.red-highlight {
+      background: rgba(180, 40, 40, 0.25) !important;
+      border-color: rgba(220, 60, 60, 0.5) !important;
+      color: #ff9090 !important;
+    }
+
     #address-bar {
       flex: 1;
-      height: 32px;
-      background: #0d0d0d;
-      border: 1px solid #2a2a2a;
+      height: 28px;
+      background: #0a0a0a;
+      border: 1px solid #1e1e1e;
       border-radius: 4px;
-      padding: 0 12px;
+      padding: 0 10px;
       color: #e0e0e0;
       outline: none;
+      font-size: 12px;
     }
 
     #address-bar:focus {
@@ -304,17 +311,17 @@
 
     #tabbar {
       position: fixed;
-      top: 76px;
+      top: 68px;
       left: 0;
       right: 0;
-      height: 32px;
-      background: #181818;
+      height: 28px;
+      background: #0f0f0f;
       display: flex;
       align-items: center;
-      padding: 0 4px;
-      gap: 4px;
+      padding: 0 3px;
+      gap: 3px;
       z-index: 80;
-      border-bottom: 1px solid #2a2a2a;
+      border-bottom: 1px solid #1e1e1e;
       transition: left 0.05s linear;
     }
 
@@ -337,15 +344,15 @@
     .tab {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 5px 8px 5px 12px;
-      background: #232323;
-      border-radius: 6px 6px 0 0;
-      color: #aaa;
-      min-width: 60px;
-      max-width: 200px;
+      gap: 6px;
+      padding: 3px 6px 3px 10px;
+      background: #1a1a1a;
+      border-radius: 5px 5px 0 0;
+      color: #999;
+      min-width: 50px;
+      max-width: 180px;
       cursor: pointer;
-      height: 30px;
+      height: 26px;
     }
 
     .tab.active {
@@ -669,7 +676,7 @@
 
     #overlay {
       position: fixed;
-      top: 108px;
+      top: 96px;
       left: 0;
       right: 0;
       bottom: 0;
@@ -1159,7 +1166,7 @@
 
     #empty-state {
       position: fixed;
-      top: 108px;
+      top: 96px;
       left: 0;
       right: 0;
       bottom: 0;
@@ -1211,7 +1218,6 @@
 
   <div id="titlebar">
     <div id="titlebar-left"></div>
-    <div id="profile-counts" style="font-size:11px;color:#666;padding:0 8px;white-space:nowrap;flex-shrink:0;"></div>
     <div id="titlebar-right">
       <button class="tb-btn icon" id="btn-settings" title="Настройки">⚙</button>
       <div id="window-controls">
@@ -1221,13 +1227,15 @@
       </div>
     </div>
   </div>
+  <!-- profile-counts hidden — stats visible in tooltip on profile tabs -->
+  <div id="profile-counts" style="display:none;"></div>
 
   <div id="toolbar">
     <button class="nav-btn" id="btn-back" title="Назад" disabled>←</button>
     <button class="nav-btn" id="btn-forward" title="Вперёд" disabled>→</button>
     <button class="nav-btn" id="btn-refresh" title="Обновить" disabled>↺</button>
     <input id="address-bar" type="text" placeholder="URL или поиск... (Ctrl+E)" spellcheck="false">
-    <span id="active-profile-name" title=""></span>
+    <span id="active-profile-name" style="display:none;" title=""></span>
     <button class="nav-btn" id="btn-devtools" title="DevTools (F12)">⚡</button>
   </div>
   <!-- скрытые элементы для совместимости — настройки теперь в titlebar-right -->

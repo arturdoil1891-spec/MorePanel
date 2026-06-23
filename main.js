@@ -11,9 +11,9 @@ const ProfileService = require('./src/services/profileService.js')
 
 app.disableHardwareAcceleration()
 
-const TITLEBAR_HEIGHT = 36
-const TOOLBAR_HEIGHT = 40
-const TABBAR_HEIGHT = 32
+const TITLEBAR_HEIGHT = 32
+const TOOLBAR_HEIGHT = 36
+const TABBAR_HEIGHT = 28
 const CHROME_HEIGHT = TITLEBAR_HEIGHT + TOOLBAR_HEIGHT + TABBAR_HEIGHT
 const FILES_PANEL_DEFAULT_WIDTH = 260
 const FILES_PANEL_MIN_WIDTH = 180
@@ -1012,8 +1012,9 @@ function createWindow() {
 
       if (ctrl) {
         if (input.key === 'w' || input.key === 'W') {
+          // Only close the browser tab, NEVER close the Electron window
           mainWindow.webContents.send('shortcut-close-tab')
-          return
+          return  // return prevents default Electron close behaviour
         }
         if (input.key === 'Tab') {
           mainWindow.webContents.send(input.shift ? 'shortcut-prev-tab' : 'shortcut-next-tab')
@@ -1095,7 +1096,36 @@ function createWindow() {
       if (settings.autoLoad) {
         try {
           const mlProfiles = await loadMoreLoginProfiles()
+          const mlEnvIds = new Set(mlProfiles.map(p => String(p.envId)))
           let added = 0
+          let removed = 0
+
+          // Remove profiles that no longer exist in MoreLogin
+          for (const [id, profile] of profiles.entries()) {
+            if (profile.envId && !mlEnvIds.has(String(profile.envId))) {
+              // Suspend and clean up the deleted profile
+              clearSuspendCountdown(id)
+              const tabs = tabsByProfile.get(id) || []
+              for (const t of tabs) {
+                if (t.view && !t.view.webContents.isDestroyed()) {
+                  if (activeView === t.view) { activeView = null }
+                  try { mainWindow.contentView.removeChildView(t.view) } catch {}
+                  addedViews.delete(t.view)
+                  try { t.view.webContents.close() } catch {}
+                }
+              }
+              profiles.delete(id)
+              tabsByProfile.delete(id)
+              if (activeProfileId === id) {
+                activeProfileId = null
+                const firstId = profiles.keys().next().value
+                if (firstId) activeProfileId = firstId
+              }
+              removed++
+            }
+          }
+
+          // Add new profiles from MoreLogin
           for (const mlp of mlProfiles) {
             const alreadyExists = Array.from(profiles.values()).some(p => p.envId === String(mlp.envId))
             if (alreadyExists) continue
@@ -1116,7 +1146,8 @@ function createWindow() {
             tabsByProfile.set(id, [])
             added++
           }
-          if (added > 0) {
+
+          if (added > 0 || removed > 0) {
             scheduleAppStateSave()
           }
         } catch (e) {
@@ -1138,7 +1169,16 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
-app.on('before-quit', () => { saveWindowState(); saveAppStateNow() })
+app.on('before-quit', () => {
+  saveWindowState()
+  saveAppStateNow()
+  // Close all running MoreLogin browser profiles so no orphan processes remain
+  for (const profile of profiles.values()) {
+    if (profile.envId && profile.debugPort && !profile.suspended) {
+      closeMLProfile(profile.envId).catch(() => {})
+    }
+  }
+})
 
 ipcMain.handle('create-profile', async (_e, name) => {
   const id = uid()
