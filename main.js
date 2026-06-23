@@ -12,8 +12,8 @@ const ProfileService = require('./src/services/profileService.js')
 app.disableHardwareAcceleration()
 
 const TITLEBAR_HEIGHT = 36
-const TOOLBAR_HEIGHT = 44
-const TABBAR_HEIGHT = 36
+const TOOLBAR_HEIGHT = 40
+const TABBAR_HEIGHT = 32
 const CHROME_HEIGHT = TITLEBAR_HEIGHT + TOOLBAR_HEIGHT + TABBAR_HEIGHT
 const FILES_PANEL_DEFAULT_WIDTH = 260
 const FILES_PANEL_MIN_WIDTH = 180
@@ -72,6 +72,31 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
+function getWindowStatePath() {
+  try { return path.join(app.getPath('userData'), 'window-state.json') }
+  catch (e) { return null }
+}
+
+function loadWindowState() {
+  const file = getWindowStatePath()
+  if (!file || !fs.existsSync(file)) return { width: 1400, height: 900, x: undefined, y: undefined, maximized: false }
+  try {
+    const d = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    return { width: d.width || 1400, height: d.height || 900, x: d.x, y: d.y, maximized: !!d.maximized }
+  } catch (e) { return { width: 1400, height: 900, x: undefined, y: undefined, maximized: false } }
+}
+
+function saveWindowState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const file = getWindowStatePath()
+  if (!file) return
+  try {
+    const b = mainWindow.getBounds()
+    const maximized = mainWindow.isMaximized()
+    fs.writeFileSync(file, JSON.stringify({ width: b.width, height: b.height, x: b.x, y: b.y, maximized }))
+  } catch (e) { }
+}
+
 function getStateFilePath() {
   try { return path.join(app.getPath('userData'), 'app-state.json') }
   catch (e) { return null }
@@ -87,12 +112,13 @@ function saveAppStateNow() {
         id: p.id,
         name: p.name,
         envId: p.envId,
+        groupName: p.groupName || '',
+        remark: p.remark || '',
         activeTabId: p.activeTabId,
-        tabs: (tabsByProfile.get(p.id) || []).map((t) => ({
-          id: t.id,
-          url: t.url,
-          title: t.title
-        }))
+        tabs: (tabsByProfile.get(p.id) || []).map((t) => {
+          if (t.view && !t.view.webContents.isDestroyed()) captureTabHistory(t)
+          return { id: t.id, url: t.url, title: t.title, history: t.history || null }
+        })
       }))
     }
     fs.writeFileSync(file, JSON.stringify(data, null, 2))
@@ -214,6 +240,8 @@ function loadAppState() {
         id: p.id,
         name: p.name || 'Профиль',
         envId: p.envId || null,
+        groupName: p.groupName || '',
+        remark: p.remark || '',
         debugPort: null,
         activeTabId: p.activeTabId || null,
         suspended: true,
@@ -226,7 +254,8 @@ function loadAppState() {
         id: t.id,
         url: t.url || 'about:blank',
         title: t.title || '',
-        view: null
+        view: null,
+        history: t.history || null
       }))
       tabsByProfile.set(p.id, tabs)
     }
@@ -286,7 +315,72 @@ function createView(partition) {
     }
   })
   attachDevToolsListeners(view)
+  attachViewShortcuts(view)
   return view
+}
+
+// Перехватываем горячие клавиши прямо в WebContentsView —
+// когда фокус в браузере, mainWindow.before-input-event не срабатывает.
+function attachViewShortcuts(view) {
+  view.webContents.on('before-input-event', (_e, input) => {
+    if (input.type !== 'keyDown') return
+    const ctrl = input.control || input.meta
+
+    // Ctrl+W — закрыть вкладку
+    if (ctrl && !input.shift && !input.alt && (input.key === 'w' || input.key === 'W')) {
+      mainWindow && !mainWindow.webContents.isDestroyed() &&
+        mainWindow.webContents.send('shortcut-close-tab')
+      return
+    }
+
+    // Ctrl+Tab / Ctrl+Shift+Tab — следующая / предыдущая вкладка
+    if (ctrl && !input.alt && input.key === 'Tab') {
+      mainWindow && !mainWindow.webContents.isDestroyed() &&
+        mainWindow.webContents.send(input.shift ? 'shortcut-prev-tab' : 'shortcut-next-tab')
+      return
+    }
+
+    // Ctrl+T — новая вкладка
+    if (ctrl && !input.shift && !input.alt && (input.key === 't' || input.key === 'T')) {
+      mainWindow && !mainWindow.webContents.isDestroyed() &&
+        mainWindow.webContents.send('shortcut-new-tab')
+      return
+    }
+
+    // Ctrl+E — фокус на адресную строку
+    if (ctrl && !input.shift && !input.alt && (input.key === 'e' || input.key === 'E')) {
+      mainWindow && !mainWindow.webContents.isDestroyed() &&
+        mainWindow.webContents.send('shortcut-focus-address')
+      return
+    }
+
+    // Ctrl+B — файловая панель
+    if (ctrl && !input.shift && !input.alt && (input.key === 'b' || input.key === 'B')) {
+      mainWindow && !mainWindow.webContents.isDestroyed() &&
+        mainWindow.webContents.send('shortcut-toggle-files')
+      return
+    }
+
+    // F12 / Ctrl+Shift+I — DevTools
+    if (input.key === 'F12' ||
+        (ctrl && input.shift && (input.key === 'I' || input.key === 'i'))) {
+      if (view && !view.webContents.isDestroyed()) {
+        view.webContents.isDevToolsOpened()
+          ? view.webContents.closeDevTools()
+          : view.webContents.openDevTools({ mode: 'detach' })
+      }
+      return
+    }
+
+    // F11 — полный экран
+    if (input.key === 'F11') {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const fs = !mainWindow.isFullScreen()
+        mainWindow.setFullScreen(fs)
+      }
+      return
+    }
+  })
 }
 
 function serializeTab(tab) {
@@ -298,6 +392,8 @@ function serializeProfile(profile) {
     id: profile.id,
     name: profile.name,
     envId: profile.envId,
+    groupName: profile.groupName || '',
+    remark: profile.remark || '',
     debugPort: profile.debugPort,
     tabs: (tabsByProfile.get(profile.id) || []).map(serializeTab),
     activeTabId: profile.activeTabId,
@@ -477,6 +573,92 @@ async function syncCookies(debugPort, electronSession) {
   return count
 }
 
+// Обратная синхронизация: куки, появившиеся внутри Electron-сессии (логины, согласия cookie-banner и т.д.),
+// записываем обратно в MoreLogin Chrome перед его закрытием, чтобы они не потерялись между запусками.
+async function pushCookiesToML(debugPort, electronSession) {
+  try {
+    const target = await waitForCdp(debugPort)
+    await cdpWs(target.webSocketDebuggerUrl, 'Network.enable')
+    const cookies = await electronSession.cookies.get({})
+    let count = 0
+    for (const c of cookies) {
+      try {
+        await cdpWs(target.webSocketDebuggerUrl, 'Network.setCookie', {
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path || '/',
+          secure: !!c.secure,
+          httpOnly: !!c.httpOnly,
+          sameSite: c.sameSite === 'no_restriction' ? 'None' : (c.sameSite === 'lax' || c.sameSite === 'strict') ? (c.sameSite[0].toUpperCase() + c.sameSite.slice(1)) : undefined,
+          expires: c.expirationDate || undefined
+        }, 8000)
+        count++
+      } catch (e) { }
+    }
+    return count
+  } catch (e) {
+    if (settings.debugLogs) console.error('pushCookiesToML error:', e.message)
+    return 0
+  }
+}
+
+// Снимок истории переходов вкладки (back/forward stack), чтобы её можно было восстановить
+// после suspend/resume или перезапуска приложения (Electron уничтожает WebContentsView при suspend).
+function captureTabHistory(tab) {
+  if (!tab || !tab.view || tab.view.webContents.isDestroyed()) return
+  try {
+    const nh = tab.view.webContents.navigationHistory
+    if (!nh) return
+    tab.history = {
+      index: nh.getActiveIndex(),
+      entries: nh.getAllEntries().map((e) => ({ url: e.url, title: e.title }))
+    }
+  } catch (e) { }
+}
+
+function restoreTabHistory(tab) {
+  if (!tab || !tab.view || tab.view.webContents.isDestroyed()) return
+  if (!tab.history || !Array.isArray(tab.history.entries) || tab.history.entries.length === 0) return
+  try {
+    const nh = tab.view.webContents.navigationHistory
+    if (nh && typeof nh.restore === 'function') {
+      nh.restore({ index: tab.history.index || 0, entries: tab.history.entries }).catch(() => { })
+    }
+  } catch (e) { }
+}
+
+// Применяем прокси профиля MoreLogin к Electron-сессии, чтобы трафик WebContentsView шёл
+// через тот же прокси, что и сам антидетект-профиль (иначе IP/геолокация не совпадут).
+async function applyProxyToSession(envId, electronSession) {
+  if (!envId) return
+  try {
+    let proxy = null
+    const cached = profileService.getCachedProfiles().find((p) => p.envId === String(envId))
+    if (cached && cached.proxy) proxy = cached.proxy
+    if (!proxy) {
+      const detail = await profileService.getProfileDetail(envId)
+      proxy = detail && detail.proxy
+    }
+    if (!proxy || !proxy.host || !proxy.port || proxy.type === 'noproxy' || proxy.type === 'direct') {
+      await electronSession.setProxy({ mode: 'direct' })
+      return
+    }
+    const scheme = proxy.type.startsWith('socks') ? proxy.type : (proxy.type === 'https' ? 'https' : 'http')
+    const rule = `${scheme}=${proxy.host}:${proxy.port}`
+    await electronSession.setProxy({ proxyRules: rule })
+    if (proxy.username) {
+      electronSession.removeAllListeners('login')
+      electronSession.on('login', (event, authInfo, callback) => {
+        event.preventDefault()
+        callback(proxy.username, proxy.password || '')
+      })
+    }
+  } catch (e) {
+    if (settings.debugLogs) console.error('applyProxyToSession error:', e.message)
+  }
+}
+
 async function syncStorageForOrigin(debugPort) {
   const target = await waitForCdp(debugPort)
   await cdpWs(target.webSocketDebuggerUrl, 'Runtime.enable')
@@ -581,7 +763,7 @@ async function launchMLProfileFull(profileId, envId, mlName) {
     profile.debugPort = debugPort
 
     await waitForCdp(debugPort)
-    const tabs = await getCdpTabs(debugPort)
+    const cdpTabs = await getCdpTabs(debugPort)
     // Фильтруем extension-страницу MoreLogin и служебные страницы
     const isUsablePage = (t) =>
       t.type === 'page' &&
@@ -589,29 +771,47 @@ async function launchMLProfileFull(profileId, envId, mlName) {
       !t.url.startsWith('chrome-extension://') &&
       !t.url.startsWith('chrome-error://') &&
       !t.url.startsWith('about:')
-    const pageTab = tabs.find(isUsablePage) || tabs.find((t) => t.type === 'page')
+    const pageTab = cdpTabs.find(isUsablePage) || cdpTabs.find((t) => t.type === 'page')
     const initialUrl = (pageTab && pageTab.url && isUsablePage(pageTab)) ? pageTab.url : 'about:blank'
 
     const partition = `persist:ml-${envId}`
     const electronSession = session.fromPartition(partition)
+    await applyProxyToSession(envId, electronSession)
     const cookieCount = await syncCookies(debugPort, electronSession)
 
-    const tab = {
-      id: uid(),
-      url: initialUrl,
-      title: pageTab ? (pageTab.title || mlName || 'MoreLogin') : (mlName || 'MoreLogin'),
-      view: createView(partition)
+    // Если у профиля уже были вкладки (повторный запуск после suspend/перезапуска приложения) —
+    // восстанавливаем именно их (включая историю переходов), а не создаём новую вкладку с нуля.
+    let tabsArr = tabsByProfile.get(profileId) || []
+    const isFirstLaunch = tabsArr.length === 0
+
+    if (isFirstLaunch) {
+      const tab = {
+        id: uid(),
+        url: initialUrl,
+        title: pageTab ? (pageTab.title || mlName || 'MoreLogin') : (mlName || 'MoreLogin'),
+        view: null,
+        history: null
+      }
+      tabsArr = [tab]
+      tabsByProfile.set(profileId, tabsArr)
+      profile.activeTabId = tab.id
     }
-    const tabsArr = tabsByProfile.get(profileId) || []
-    tabsArr.push(tab)
-    tabsByProfile.set(profileId, tabsArr)
-    profile.activeTabId = tab.id
+
+    for (const t of tabsArr) {
+      if (t.view && !t.view.webContents.isDestroyed()) continue
+      t.view = createView(partition)
+      attachTabHandlers(profileId, t)
+      t.view.webContents.loadURL(t.url || 'about:blank')
+      if (t.history) {
+        t.view.webContents.once('did-finish-load', () => restoreTabHistory(t))
+      }
+    }
+
     profile.suspended = false
     profile.launching = false
-    attachTabHandlers(profileId, tab)
-    tab.view.webContents.loadURL(tab.url)
 
-    if (profileId === activeProfileId) showView(tab.view)
+    const activeTab = tabsArr.find((t) => t.id === profile.activeTabId) || tabsArr[0]
+    if (profileId === activeProfileId && activeTab) showView(activeTab.view)
 
     if (mainWindow && !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.send('ml-cookies-synced', { profileId, count: cookieCount })
@@ -654,16 +854,18 @@ function startSuspendCountdown(profileId) {
   suspendTimers.set(profileId, timer)
 }
 
-async function suspendProfile(profileId) {
+async function suspendProfile(profileId, force) {
   const profile = profiles.get(profileId)
   if (!profile) return
-  if (profileId === activeProfileId) return
+  if (profileId === activeProfileId && !force) return
   if (profile.suspended) return
 
   const tabs = tabsByProfile.get(profileId) || []
   for (const t of tabs) {
     if (t.view && !t.view.webContents.isDestroyed()) {
       try { t.url = t.view.webContents.getURL() } catch (e) { }
+      captureTabHistory(t)
+      if (activeView === t.view) activeView = null
       try { mainWindow.contentView.removeChildView(t.view) } catch (e) { }
       addedViews.delete(t.view)
       try { t.view.webContents.close() } catch (e) { }
@@ -672,6 +874,10 @@ async function suspendProfile(profileId) {
   }
 
   if (profile.envId && profile.debugPort) {
+    try {
+      const electronSession = session.fromPartition(`persist:ml-${profile.envId}`)
+      await pushCookiesToML(profile.debugPort, electronSession)
+    } catch (e) { }
     closeMLProfile(profile.envId).catch(() => { })
     profile.debugPort = null
   }
@@ -706,12 +912,21 @@ function resumeProfile(profileId, makeActive) {
 
   profile.suspended = false
   const tabs = tabsByProfile.get(profileId) || []
+  // Локальный профиль без единой вкладки (только что создан) — заводим стартовую about:blank,
+  // чтобы профиль реально "запускался", а не оставался пустым окном.
+  if (tabs.length === 0) {
+    const tab = { id: uid(), url: 'about:blank', title: 'about:blank', view: null, history: null }
+    tabs.push(tab)
+    tabsByProfile.set(profileId, tabs)
+    profile.activeTabId = tab.id
+  }
   const activeTabId = profile.activeTabId || (tabs[0] && tabs[0].id)
   const tab = tabs.find((t) => t.id === activeTabId)
   if (tab && !tab.view) {
     tab.view = createView(`persist:${profileId}`)
-    tab.view.webContents.loadURL(tab.url || 'about:blank')
     attachTabHandlers(profileId, tab)
+    tab.view.webContents.loadURL(tab.url || 'about:blank')
+    if (tab.history) tab.view.webContents.once('did-finish-load', () => restoreTabHistory(tab))
   }
   showActiveTab()
   notifyProfileChange(profileId)
@@ -719,9 +934,12 @@ function resumeProfile(profileId, makeActive) {
 }
 
 function createWindow() {
+  const ws = loadWindowState()
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    width: ws.width,
+    height: ws.height,
+    x: ws.x,
+    y: ws.y,
     minWidth: 800,
     minHeight: 600,
     frame: false,
@@ -734,7 +952,10 @@ function createWindow() {
     }
   })
 
-  mainWindow.once('ready-to-show', () => mainWindow.show())
+  mainWindow.once('ready-to-show', () => {
+    if (ws.maximized) mainWindow.maximize()
+    mainWindow.show()
+  })
 
   console.log('[Main] Window created');
 
@@ -745,6 +966,20 @@ function createWindow() {
   }
   // Перехватываем Ctrl+V для вставки plain text в активную вкладку
   mainWindow.webContents.on('before-input-event', (_e, input) => {
+    if (input.type === 'keyDown' && (input.control || input.meta)) {
+      if (input.key === 'w' || input.key === 'W') {
+        mainWindow.webContents.send('shortcut-close-tab')
+        return
+      }
+      if (input.key === 'Tab') {
+        mainWindow.webContents.send(input.shift ? 'shortcut-prev-tab' : 'shortcut-next-tab')
+        return
+      }
+      if (input.key === 'e' || input.key === 'E') {
+        mainWindow.webContents.send('shortcut-focus-address')
+        return
+      }
+    }
     if ((input.control || input.meta) && input.key === 'v' && input.type === 'keyDown') {
       if (activeView && !activeView.webContents.isDestroyed()) {
         const { clipboard } = require('electron')
@@ -775,9 +1010,10 @@ function createWindow() {
     }
   })
 
-  mainWindow.on('resize', updateActiveViewBounds)
-  mainWindow.on('maximize', updateActiveViewBounds)
-  mainWindow.on('unmaximize', updateActiveViewBounds)
+  mainWindow.on('resize', () => { updateActiveViewBounds(); saveWindowState() })
+  mainWindow.on('move', saveWindowState)
+  mainWindow.on('maximize', () => { updateActiveViewBounds(); saveWindowState() })
+  mainWindow.on('unmaximize', () => { updateActiveViewBounds(); saveWindowState() })
   mainWindow.on('enter-full-screen', () => { isFullscreen = true })
   mainWindow.on('leave-full-screen', () => { isFullscreen = false; updateActiveViewBounds() })
   mainWindow.webContents.once('did-finish-load', () => {
@@ -800,7 +1036,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
-app.on('before-quit', () => { saveAppStateNow() })
+app.on('before-quit', () => { saveWindowState(); saveAppStateNow() })
 
 ipcMain.handle('create-profile', async (_e, name) => {
   const id = uid()
@@ -808,28 +1044,19 @@ ipcMain.handle('create-profile', async (_e, name) => {
     id,
     name: name || 'Профиль',
     envId: null,
+    groupName: '',
+    remark: '',
     debugPort: null,
     activeTabId: null,
-    suspended: false,
+    suspended: true,
     launching: false,
     mlError: null,
     createdAt: Date.now()
   }
   profiles.set(id, profile)
   tabsByProfile.set(id, [])
-
-  const tab = {
-    id: uid(),
-    url: 'about:blank',
-    title: 'about:blank',
-    view: createView(`persist:${id}`)
-  }
-  tabsByProfile.get(id).push(tab)
-  profile.activeTabId = tab.id
-  attachTabHandlers(id, tab)
-  tab.view.webContents.loadURL(tab.url)
-
-  if (activeProfileId === id) showView(tab.view)
+  // Профиль появляется в списке остановленным — реальный запуск (создание вкладки)
+  // происходит только при выборе профиля в верхней панели (см. resumeProfile).
   scheduleAppStateSave()
   return serializeProfile(profile)
 })
@@ -870,8 +1097,9 @@ ipcMain.handle('switch-profile', async (_e, profileId) => {
     if (!tab.view) {
       const partition = profile.envId ? `persist:ml-${profile.envId}` : `persist:${profileId}`
       tab.view = createView(partition)
-      tab.view.webContents.loadURL(tab.url || 'about:blank')
       attachTabHandlers(profileId, tab)
+      tab.view.webContents.loadURL(tab.url || 'about:blank')
+      if (tab.history) tab.view.webContents.once('did-finish-load', () => restoreTabHistory(tab))
     }
     profile.activeTabId = tab.id
     showView(tab.view)
@@ -967,9 +1195,7 @@ ipcMain.handle('remove-profile', async (_e, profileId) => {
       t.view.webContents.close()
     }
   }
-  if (profile && profile.envId && profile.debugPort) {
-    closeMLProfile(profile.envId).catch(() => { })
-  }
+  // НЕ закрываем ML-профиль при удалении из Electron — пользователь сам управляет им в MoreLogin
   profiles.delete(profileId)
   tabsByProfile.delete(profileId)
 
@@ -1002,6 +1228,16 @@ ipcMain.handle('list-profiles', async () => ({
   profiles: Array.from(profiles.values()).map(serializeProfile),
   activeProfileId
 }))
+
+// Останавливает профиль (закрывает вкладки/ML-браузер), но НЕ удаляет его из списка.
+// Это то, что должна делать кнопка «×» рядом с профилем.
+ipcMain.handle('stop-profile', async (_e, profileId) => {
+  const profile = profiles.get(profileId)
+  if (!profile) return { ok: false, error: 'Profile not found' }
+  clearSuspendCountdown(profileId)
+  await suspendProfile(profileId, true)
+  return { ok: true, profile: serializeProfile(profile) }
+})
 
 ipcMain.handle('set-files-panel-state', async (_e, { visible, width }) => {
   filesPanelVisible = !!visible
@@ -1114,19 +1350,19 @@ ipcMain.handle('ml:import', async (_e, envId) => {
       id,
       name: mlInfo.name,
       envId: String(envId),
+      groupName: mlInfo.groupName || '',
+      remark: mlInfo.remark || '',
       debugPort: null,
       activeTabId: null,
-      suspended: false,
-      launching: true,
+      suspended: true,
+      launching: false,
       mlError: null,
       createdAt: Date.now()
     }
     profiles.set(id, profile)
     tabsByProfile.set(id, [])
-
-    launchMLProfileFull(id, String(envId), mlInfo.name).catch((e) => {
-      if (settings.debugLogs) console.error('ML launch full error:', e)
-    })
+    // Не запускаем ML-браузер сразу — профиль появляется остановленным,
+    // запуск произойдёт при выборе в верхней панели.
 
     scheduleAppStateSave()
     return { ok: true, profile: serializeProfile(profile) }
@@ -1150,18 +1386,27 @@ ipcMain.handle('ml:sync-cookies', async (_e, profileId) => {
 ipcMain.handle('ml:close', async (_e, profileId) => {
   const profile = profiles.get(profileId)
   if (!profile) return { ok: false, error: 'Profile not found' }
+  if (profile.envId && profile.debugPort) {
+    try {
+      const electronSession = session.fromPartition(`persist:ml-${profile.envId}`)
+      await pushCookiesToML(profile.debugPort, electronSession)
+    } catch (e) { }
+  }
   if (profile.envId) await closeMLProfile(profile.envId)
   profile.debugPort = null
   profile.suspended = true
+  // Сохраняем url/историю вкладок (как при suspend), а не стираем их —
+  // при следующем запуске профиль должен продолжить с того же места.
   for (const t of (tabsByProfile.get(profileId) || [])) {
     if (t.view && !t.view.webContents.isDestroyed()) {
+      try { t.url = t.view.webContents.getURL() } catch (e) { }
+      captureTabHistory(t)
       try { mainWindow.contentView.removeChildView(t.view) } catch { }
       addedViews.delete(t.view)
       t.view.webContents.close()
     }
+    t.view = null
   }
-  tabsByProfile.set(profileId, [])
-  profile.activeTabId = null
   if (activeProfileId === profileId) activeView = null
   notifyProfileChange(profileId)
   scheduleAppStateSave()
@@ -1298,6 +1543,41 @@ ipcMain.on('fs:start-drag', (e, { filePath, isFolder }) => {
     try { e.sender.startDrag({ file: filePath, icon: getDragIcon() }) }
     catch (err) { if (settings.debugLogs) console.error('startDrag file error:', err.message) }
   }
+})
+
+function getFolderSize(dirPath) {
+  let total = 0
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true })
+    for (const e of entries) {
+      const full = path.join(dirPath, e.name)
+      if (e.isDirectory()) total += getFolderSize(full)
+      else { try { total += fs.statSync(full).size } catch (e) { } }
+    }
+  } catch (e) { }
+  return total
+}
+
+ipcMain.handle('fs:get-folder-size', async (_e, folderPath) => {
+  try {
+    const size = getFolderSize(path.resolve(folderPath))
+    return { ok: true, size }
+  } catch (e) { return { ok: false, error: e.message } }
+})
+
+ipcMain.handle('fs:delete-paths', async (_e, paths) => {
+  const results = []
+  for (const p of (paths || [])) {
+    try {
+      const resolved = path.resolve(p)
+      const stat = safeStat(resolved)
+      if (!stat) { results.push({ path: p, ok: false, error: 'not found' }); continue }
+      if (stat.isDirectory()) fs.rmSync(resolved, { recursive: true, force: true })
+      else fs.unlinkSync(resolved)
+      results.push({ path: p, ok: true })
+    } catch (e) { results.push({ path: p, ok: false, error: e.message }) }
+  }
+  return { ok: true, results }
 })
 
 ipcMain.handle('fs:reveal-in-folder', async (_e, filePath) => {

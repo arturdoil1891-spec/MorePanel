@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   createProfile: (name) => ipcRenderer.invoke('create-profile', name),
   switchProfile: (id) => ipcRenderer.invoke('switch-profile', id),
   removeProfile: (id) => ipcRenderer.invoke('remove-profile', id),
+  stopProfile: (id) => ipcRenderer.invoke('stop-profile', id),
   listProfiles: () => ipcRenderer.invoke('list-profiles'),
 
   newTab: (profileId, url) => ipcRenderer.invoke('new-tab', { profileId, url }),
@@ -27,10 +28,14 @@ contextBridge.exposeInMainWorld('api', {
   fsSetRoot: (folderPath) => ipcRenderer.invoke('fs:set-root', folderPath),
   fsGetRoot: () => ipcRenderer.invoke('fs:get-root'),
   fsArchiveFolder: (folderPath, destPath) => ipcRenderer.invoke('fs:archive-folder', { folderPath, destPath }),
+  fsArchiveMultiple: ({ paths, destPath }) => ipcRenderer.invoke('fs:archive-multiple', { paths, destPath }),
   fsRevealInFolder: (filePath) => ipcRenderer.invoke('fs:reveal-in-folder', filePath),
   fsOpenPath: (filePath) => ipcRenderer.invoke('fs:open-path', filePath),
   fsCopyPath: (filePath) => ipcRenderer.invoke('fs:copy-path', filePath),
   fsStartDrag: (filePath, isFolder) => ipcRenderer.send('fs:start-drag', { filePath, isFolder }),
+  fsStartDragMultiple: (filePaths) => ipcRenderer.send('fs:start-drag-multiple', { filePaths }),
+  fsGetFolderSize: (folderPath) => ipcRenderer.invoke('fs:get-folder-size', folderPath),
+  fsDeletePaths: (paths) => ipcRenderer.invoke('fs:delete-paths', paths),
 
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (payload) => ipcRenderer.invoke('save-settings', payload),
@@ -84,7 +89,31 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('ml-list-updated', listener)
   },
   diagnostics: () => ipcRenderer.invoke('run-diagnostics'),
-  pastePlainText: (text) => ipcRenderer.invoke('paste-plain-text', text)
+  pastePlainText: (text) => ipcRenderer.invoke('paste-plain-text', text),
+  onShortcutCloseTab: (cb) => {
+    const l = () => cb(); ipcRenderer.on('shortcut-close-tab', l)
+    return () => ipcRenderer.removeListener('shortcut-close-tab', l)
+  },
+  onShortcutNextTab: (cb) => {
+    const l = () => cb(); ipcRenderer.on('shortcut-next-tab', l)
+    return () => ipcRenderer.removeListener('shortcut-next-tab', l)
+  },
+  onShortcutPrevTab: (cb) => {
+    const l = () => cb(); ipcRenderer.on('shortcut-prev-tab', l)
+    return () => ipcRenderer.removeListener('shortcut-prev-tab', l)
+  },
+  onShortcutFocusAddress: (cb) => {
+    const l = () => cb(); ipcRenderer.on('shortcut-focus-address', l)
+    return () => ipcRenderer.removeListener('shortcut-focus-address', l)
+  },
+  onShortcutNewTab: (cb) => {
+    const l = () => cb(); ipcRenderer.on('shortcut-new-tab', l)
+    return () => ipcRenderer.removeListener('shortcut-new-tab', l)
+  },
+  onShortcutToggleFiles: (cb) => {
+    const l = () => cb(); ipcRenderer.on('shortcut-toggle-files', l)
+    return () => ipcRenderer.removeListener('shortcut-toggle-files', l)
+  }
 })
 
 contextBridge.exposeInMainWorld(

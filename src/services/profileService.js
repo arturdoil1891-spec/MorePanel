@@ -57,6 +57,35 @@ class ProfileService {
     }
   }
 
+  // MoreLogin отдаёт настройки прокси профиля разными полями в зависимости от версии API,
+  // поэтому собираем их максимально терпимо к названиям.
+  _extractProxy(p) {
+    if (!p) return null
+    const src = p.proxyInfo || p.proxy || p
+    const type = src.proxyType || src.proxy_type || src.protocol || ''
+    const host = src.proxyHost || src.proxy_host || src.host || src.ip || ''
+    const port = src.proxyPort || src.proxy_port || src.port || ''
+    if (!type && !host) return null
+    return {
+      type: String(type || 'noproxy').toLowerCase(),
+      host: host ? String(host) : '',
+      port: port ? Number(port) : null,
+      username: src.proxyAccount || src.proxyUser || src.proxy_user || src.username || '',
+      password: src.proxyPassword || src.proxy_password || src.password || ''
+    }
+  }
+
+  // Если /api/env/page не отдаёт прокси, пробуем точечный запрос по профилю.
+  async getProfileDetail(envId) {
+    try {
+      const data = await this._makeLocalRequest('POST', '/api/env/info', { envId })
+      return { envId: String(envId), proxy: this._extractProxy(data && (data.proxyInfo || data)) }
+    } catch (e) {
+      logEvent('getProfileDetail error', `envId=${envId} - ${e.message}`)
+      return { envId: String(envId), proxy: null }
+    }
+  }
+
   async getLocalProfiles(retryCount = 3) {
     for (let attempt = 1; attempt <= retryCount; attempt++) {
       try {
@@ -75,6 +104,7 @@ class ProfileService {
           name: p.name || p.envName || p.nickName || `Profile ${p.envId || p.id || ''}`,
           groupName: p.groupName || p.groupId || p.group || '',
           remark: p.remark || '',
+          proxy: this._extractProxy(p),
           _source: 'local'
         })).filter((p) => p.envId)
 
@@ -107,6 +137,7 @@ class ProfileService {
           name: p.name || p.envName || p.nickName || `Profile ${p.envId || p.id || ''}`,
           groupName: p.groupName || p.groupId || p.group || '',
           remark: p.remark || '',
+          proxy: this._extractProxy(p),
           _source: 'cloud'
         })).filter((p) => p.envId)
 
