@@ -32,10 +32,13 @@ contextBridge.exposeInMainWorld('api', {
   fsRevealInFolder: (filePath) => ipcRenderer.invoke('fs:reveal-in-folder', filePath),
   fsOpenPath: (filePath) => ipcRenderer.invoke('fs:open-path', filePath),
   fsCopyPath: (filePath) => ipcRenderer.invoke('fs:copy-path', filePath),
-  fsStartDrag: (filePath, isFolder) => ipcRenderer.send('fs:start-drag', { filePath, isFolder }),
-  fsStartDragMultiple: (filePaths) => ipcRenderer.send('fs:start-drag-multiple', { filePaths }),
+  fsStartDrag: (filePath, isFolder) => ipcRenderer.sendSync('fs:start-drag-sync', { filePath, isFolder }),
+  fsStartDragMultiple: (filePaths) => ipcRenderer.sendSync('fs:start-drag-sync', { filePaths, isFolder: false, multi: true }),
   fsGetFolderSize: (folderPath) => ipcRenderer.invoke('fs:get-folder-size', folderPath),
   fsDeletePaths: (paths) => ipcRenderer.invoke('fs:delete-paths', paths),
+  fsReadFile: (filePath) => ipcRenderer.invoke('fs:read-file', filePath),
+  fsInsertToView: (filePath, x, y) => ipcRenderer.invoke('fs:insert-to-view', { filePath, x, y }),
+  insertToView: (text, x, y) => ipcRenderer.invoke('fs:insert-text-to-view', { text, x, y }),
 
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (payload) => ipcRenderer.invoke('save-settings', payload),
@@ -90,6 +93,7 @@ contextBridge.exposeInMainWorld('api', {
   },
   diagnostics: () => ipcRenderer.invoke('run-diagnostics'),
   pastePlainText: (text) => ipcRenderer.invoke('paste-plain-text', text),
+  pasteAtCoords: (text, x, y) => ipcRenderer.invoke('paste-at-coords', { text, x, y }),
   onShortcutCloseTab: (cb) => {
     const l = () => cb(); ipcRenderer.on('shortcut-close-tab', l)
     return () => ipcRenderer.removeListener('shortcut-close-tab', l)

@@ -363,11 +363,45 @@ function attachViewShortcuts(view) {
 
     // F12 / Ctrl+Shift+I — DevTools
     if (input.key === 'F12' ||
-        (ctrl && input.shift && (input.key === 'I' || input.key === 'i'))) {
+      (ctrl && input.shift && (input.key === 'I' || input.key === 'i'))) {
       if (view && !view.webContents.isDestroyed()) {
         view.webContents.isDevToolsOpened()
           ? view.webContents.closeDevTools()
           : view.webContents.openDevTools({ mode: 'detach' })
+      }
+      return
+    }
+
+    // F5 — обновить активную вкладку
+    if (input.key === 'F5') {
+      if (view && !view.webContents.isDestroyed()) {
+        view.webContents.reload()
+      }
+      return
+    }
+
+    // Ctrl+Plus / Ctrl+= — увеличить масштаб
+    if (ctrl && !input.shift && !input.alt && (input.key === '+' || input.key === '=')) {
+      if (view && !view.webContents.isDestroyed()) {
+        const zf = view.webContents.getZoomFactor()
+        view.webContents.setZoomFactor(Math.min(zf + 0.1, 5.0))
+      }
+      return
+    }
+
+    // Ctrl+Minus — уменьшить масштаб
+    if (ctrl && !input.shift && !input.alt && input.key === '-') {
+      if (view && !view.webContents.isDestroyed()) {
+        const zf = view.webContents.getZoomFactor()
+        view.webContents.setZoomFactor(Math.max(zf - 0.1, 0.1))
+      }
+      return
+    }
+
+    // Ctrl+0 — сбросить масштаб
+    if (ctrl && !input.shift && !input.alt && input.key === '0') {
+      if (view && !view.webContents.isDestroyed()) {
+        view.webContents.setZoomFactor(1.0)
       }
       return
     }
@@ -943,6 +977,8 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     frame: false,
+    // Без titleBarStyle overlay — окно не перекрывает taskbar при maximize
+    // (только F11 уходит в настоящий fullscreen поверх всего)
     backgroundColor: '#1a1a1a',
     show: false,
     webPreferences: {
@@ -960,24 +996,56 @@ function createWindow() {
   console.log('[Main] Window created');
 
   mainWindow.loadFile('index.html')
-  // DevTools открываются только если включён debug-лог (через .env MORELOGIN_DEBUG=true)
-  if (settings.debugLogs) {
-    mainWindow.webContents.openDevTools({ mode: 'detach' })
-  }
+  // DevTools главного окна не открываем автоматически никогда — только через кнопку ⚡ или F12
   // Перехватываем Ctrl+V для вставки plain text в активную вкладку
   mainWindow.webContents.on('before-input-event', (_e, input) => {
-    if (input.type === 'keyDown' && (input.control || input.meta)) {
-      if (input.key === 'w' || input.key === 'W') {
-        mainWindow.webContents.send('shortcut-close-tab')
+    if (input.type === 'keyDown') {
+      const ctrl = input.control || input.meta
+
+      // F5 — обновить активную вкладку
+      if (input.key === 'F5') {
+        if (activeView && !activeView.webContents.isDestroyed()) {
+          activeView.webContents.reload()
+        }
         return
       }
-      if (input.key === 'Tab') {
-        mainWindow.webContents.send(input.shift ? 'shortcut-prev-tab' : 'shortcut-next-tab')
-        return
-      }
-      if (input.key === 'e' || input.key === 'E') {
-        mainWindow.webContents.send('shortcut-focus-address')
-        return
+
+      if (ctrl) {
+        if (input.key === 'w' || input.key === 'W') {
+          mainWindow.webContents.send('shortcut-close-tab')
+          return
+        }
+        if (input.key === 'Tab') {
+          mainWindow.webContents.send(input.shift ? 'shortcut-prev-tab' : 'shortcut-next-tab')
+          return
+        }
+        if (input.key === 'e' || input.key === 'E') {
+          mainWindow.webContents.send('shortcut-focus-address')
+          return
+        }
+        // Ctrl+Plus / Ctrl+= — увеличить масштаб
+        if (!input.shift && !input.alt && (input.key === '+' || input.key === '=')) {
+          if (activeView && !activeView.webContents.isDestroyed()) {
+            const zf = activeView.webContents.getZoomFactor()
+            activeView.webContents.setZoomFactor(Math.min(zf + 0.1, 5.0))
+          }
+          return
+        }
+        // Ctrl+Minus — уменьшить масштаб
+        if (!input.shift && !input.alt && input.key === '-') {
+          if (activeView && !activeView.webContents.isDestroyed()) {
+            const zf = activeView.webContents.getZoomFactor()
+            activeView.webContents.setZoomFactor(Math.max(zf - 0.1, 0.1))
+          }
+          return
+        }
+        // Ctrl+0 — сбросить масштаб
+        if (!input.shift && !input.alt && input.key === '0') {
+          if (activeView && !activeView.webContents.isDestroyed()) {
+            activeView.webContents.setZoomFactor(1.0)
+          }
+          return
+        }
       }
     }
     if ((input.control || input.meta) && input.key === 'v' && input.type === 'keyDown') {
@@ -1017,9 +1085,43 @@ function createWindow() {
   mainWindow.on('enter-full-screen', () => { isFullscreen = true })
   mainWindow.on('leave-full-screen', () => { isFullscreen = false; updateActiveViewBounds() })
   mainWindow.webContents.once('did-finish-load', () => {
-    setTimeout(() => {
+    setTimeout(async () => {
+      // Восстанавливаем активный профиль из прошлой сессии
       if (activeProfileId && profiles.has(activeProfileId)) {
         resumeProfile(activeProfileId, true)
+      }
+
+      // Автозагрузка новых профилей из MoreLogin
+      if (settings.autoLoad) {
+        try {
+          const mlProfiles = await loadMoreLoginProfiles()
+          let added = 0
+          for (const mlp of mlProfiles) {
+            const alreadyExists = Array.from(profiles.values()).some(p => p.envId === String(mlp.envId))
+            if (alreadyExists) continue
+            const id = uid()
+            profiles.set(id, {
+              id,
+              name: mlp.name,
+              envId: String(mlp.envId),
+              groupName: mlp.groupName || '',
+              remark: mlp.remark || '',
+              debugPort: null,
+              activeTabId: null,
+              suspended: true,
+              launching: false,
+              mlError: null,
+              createdAt: Date.now()
+            })
+            tabsByProfile.set(id, [])
+            added++
+          }
+          if (added > 0) {
+            scheduleAppStateSave()
+          }
+        } catch (e) {
+          if (settings.debugLogs) console.error('autoLoad error:', e.message)
+        }
       }
     }, 50)
   })
@@ -1521,27 +1623,22 @@ ipcMain.handle('fs:archive-multiple', async (_e, { paths, destPath }) => {
   }
 })
 
-ipcMain.on('fs:start-drag', (e, { filePath, isFolder }) => {
-  if (typeof filePath !== 'string' || !filePath) return
-  if (!fs.existsSync(filePath)) return
-  if (isFolder) {
-    const baseName = path.basename(filePath)
-    const zipPath = path.join(path.dirname(filePath), baseName + '.drag.zip')
-    archiveFolderTo(filePath, zipPath).then(() => {
-      try {
-        if (e.sender && !e.sender.isDestroyed()) {
-          e.sender.startDrag({ file: zipPath, icon: getDragIcon() })
-        }
-      } catch (err) {
-        if (settings.debugLogs) console.error('startDrag folder error:', err.message)
-        try { fs.unlinkSync(zipPath) } catch (e2) { }
-      }
-    }).catch((err) => {
-      if (settings.debugLogs) console.error('archive for drag error:', err.message)
-    })
-  } else {
-    try { e.sender.startDrag({ file: filePath, icon: getDragIcon() }) }
-    catch (err) { if (settings.debugLogs) console.error('startDrag file error:', err.message) }
+// Синхронный drag — ipcRenderer.sendSync блокирует renderer пока не вернём returnValue,
+// это гарантирует что e.sender.startDrag() вызывается во время активного dragstart-события.
+ipcMain.on('fs:start-drag-sync', (e, { filePath, filePaths, isFolder, multi }) => {
+  e.returnValue = null // обязательно для sendSync
+  try {
+    if (multi && Array.isArray(filePaths) && filePaths.length > 0) {
+      const existing = filePaths.filter(p => typeof p === 'string' && fs.existsSync(p))
+      if (existing.length === 0) return
+      e.sender.startDrag({ file: existing[0], icon: getDragIcon() })
+      return
+    }
+    if (typeof filePath !== 'string' || !filePath) return
+    if (!fs.existsSync(filePath)) return
+    e.sender.startDrag({ file: filePath, icon: getDragIcon() })
+  } catch (err) {
+    if (settings.debugLogs) console.error('startDrag sync error:', err.message)
   }
 })
 
@@ -1563,6 +1660,122 @@ ipcMain.handle('fs:get-folder-size', async (_e, folderPath) => {
     const size = getFolderSize(path.resolve(folderPath))
     return { ok: true, size }
   } catch (e) { return { ok: false, error: e.message } }
+})
+
+// Вставляет произвольный текст (например путь папки) в активную вкладку
+ipcMain.handle('fs:insert-text-to-view', async (_e, { text, x, y }) => {
+  try {
+    if (!activeView || activeView.webContents.isDestroyed()) return { ok: false }
+    const escaped = JSON.stringify(String(text))
+    const xCoord = typeof x === 'number' ? x : -1
+    const yCoord = typeof y === 'number' ? y : -1
+    await activeView.webContents.executeJavaScript(`
+      (() => {
+        try {
+          const text = ${escaped};
+          let target = (${xCoord} >= 0 && ${yCoord} >= 0)
+            ? document.elementFromPoint(${xCoord}, ${yCoord})
+            : document.activeElement;
+          if (!target) target = document.querySelector('textarea, input[type="text"]');
+          if (!target) return;
+          if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+            const s = target.selectionStart || 0, e2 = target.selectionEnd || 0;
+            target.value = target.value.slice(0, s) + text + target.value.slice(e2);
+            target.selectionStart = target.selectionEnd = s + text.length;
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+          } else if (target.isContentEditable) {
+            target.focus();
+            document.execCommand('insertText', false, text);
+          }
+        } catch(e) {}
+      })()
+    `)
+    return { ok: true }
+  } catch (e) { return { ok: false, error: e.message } }
+})
+
+// Читает файл для вставки в WebContentsView при drag-drop из файловой панели
+ipcMain.handle('fs:read-file', async (_e, filePath) => {
+  try {
+    if (typeof filePath !== 'string' || !filePath) throw new Error('Invalid path')
+    const resolved = path.resolve(filePath)
+    const stat = safeStat(resolved)
+    if (!stat) throw new Error('File not found')
+    if (stat.isDirectory()) throw new Error('Cannot read directory as text')
+    if (stat.size > 10 * 1024 * 1024) throw new Error('File too large (>10MB)')
+    const content = fs.readFileSync(resolved, 'utf-8')
+    return { ok: true, content, name: path.basename(resolved), size: stat.size }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+// Вставляет содержимое файла в активную вкладку WebContentsView
+ipcMain.handle('fs:insert-to-view', async (_e, { filePath, x, y }) => {
+  try {
+    if (!activeView || activeView.webContents.isDestroyed()) return { ok: false, error: 'No active view' }
+    const resolved = path.resolve(filePath)
+    const stat = safeStat(resolved)
+    if (!stat) return { ok: false, error: 'File not found' }
+    if (stat.isDirectory()) return { ok: false, error: 'Directory drop not supported' }
+    if (stat.size > 10 * 1024 * 1024) return { ok: false, error: 'File too large' }
+
+    const text = fs.readFileSync(resolved, 'utf-8')
+    const escaped = JSON.stringify(text)
+    const xCoord = typeof x === 'number' ? x : -1
+    const yCoord = typeof y === 'number' ? y : -1
+
+    await activeView.webContents.executeJavaScript(`
+      (() => {
+        try {
+          const text = ${escaped};
+          // Если есть координаты — найти элемент под курсором
+          let target = null;
+          if (${xCoord} >= 0 && ${yCoord} >= 0) {
+            target = document.elementFromPoint(${xCoord}, ${yCoord});
+          }
+          if (!target) target = document.activeElement;
+
+          if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+            const start = target.selectionStart || 0;
+            const end = target.selectionEnd || 0;
+            target.value = target.value.slice(0, start) + text + target.value.slice(end);
+            target.selectionStart = target.selectionEnd = start + text.length;
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+            target.dispatchEvent(new Event('change', { bubbles: true }));
+            target.focus();
+          } else if (target && target.isContentEditable) {
+            target.focus();
+            const sel = window.getSelection();
+            if (sel && sel.rangeCount) {
+              sel.deleteFromDocument();
+              const node = document.createTextNode(text);
+              sel.getRangeAt(0).insertNode(node);
+              sel.collapseToEnd();
+            } else {
+              document.execCommand('insertText', false, text);
+            }
+          } else {
+            // Фокус нет — ищем первый textarea/input на странице
+            const el = document.querySelector('textarea, [contenteditable="true"], input[type="text"]');
+            if (el) {
+              el.focus();
+              if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                el.value += text;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+              } else {
+                document.execCommand('insertText', false, text);
+              }
+            }
+          }
+          return 'ok';
+        } catch(e) { return 'err:' + e.message; }
+      })()
+    `)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
 })
 
 ipcMain.handle('fs:delete-paths', async (_e, paths) => {
@@ -1694,38 +1907,74 @@ ipcMain.handle('reset-settings', async () => {
 })
 
 // Вставка текста как plain text (без форматирования) в активный WebContentsView
+// Вспомогательная функция вставки текста в view — используется и Ctrl+V и drag-drop
+async function insertTextIntoView(view, text, x, y) {
+  const escaped = JSON.stringify(String(text))
+  const xc = typeof x === 'number' ? x : -1
+  const yc = typeof y === 'number' ? y : -1
+  await view.webContents.executeJavaScript(`
+    (() => {
+      const plain = ${escaped};
+      // При drag — ищем элемент под координатами курсора
+      let el = null;
+      if (${xc} >= 0 && ${yc} >= 0) {
+        el = document.elementFromPoint(${xc}, ${yc});
+        // Если попали на нередактируемый элемент — ищем ближайший редактируемый предок
+        while (el && el !== document.body) {
+          if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable) break;
+          el = el.parentElement;
+        }
+        if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
+          el.focus();
+        } else {
+          el = null;
+        }
+      }
+      // Fallback: активный элемент
+      if (!el) el = document.activeElement;
+      if (!el) return;
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        const start = el.selectionStart || 0;
+        const end = el.selectionEnd || 0;
+        el.value = el.value.slice(0, start) + plain + el.value.slice(end);
+        el.selectionStart = el.selectionEnd = start + plain.length;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      } else if (el.isContentEditable) {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount) {
+          sel.deleteFromDocument();
+          const node = document.createTextNode(plain);
+          sel.getRangeAt(0).insertNode(node);
+          sel.collapseToEnd();
+        } else {
+          document.execCommand('insertText', false, plain);
+        }
+      }
+    })()
+  `)
+}
+
 ipcMain.handle('paste-plain-text', async (_e, text) => {
   if (!activeView || activeView.webContents.isDestroyed()) return { ok: false }
   try {
-    const escaped = JSON.stringify(String(text))
-    await activeView.webContents.executeJavaScript(`
-      (() => {
-        const el = document.activeElement;
-        if (!el) return;
-        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable) {
-          const plain = ${escaped};
-          if (el.isContentEditable) {
-            const sel = window.getSelection();
-            if (sel && sel.rangeCount) {
-              sel.deleteFromDocument();
-              const node = document.createTextNode(plain);
-              sel.getRangeAt(0).insertNode(node);
-              sel.collapseToEnd();
-            } else {
-              document.execCommand('insertText', false, plain);
-            }
-          } else {
-            const start = el.selectionStart;
-            const end = el.selectionEnd;
-            const val = el.value;
-            el.value = val.slice(0, start) + plain + val.slice(end);
-            el.selectionStart = el.selectionEnd = start + plain.length;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-        }
-      })()
-    `)
+    await insertTextIntoView(activeView, text)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+// Drag-drop из файловой панели: вставка по координатам курсора в webview
+ipcMain.handle('paste-at-coords', async (_e, { text, x, y }) => {
+  if (!activeView || activeView.webContents.isDestroyed()) return { ok: false }
+  try {
+    // Сначала симулируем клик мышью чтобы перевести фокус в нужный элемент
+    activeView.webContents.sendInputEvent({ type: 'mouseDown', x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 })
+    activeView.webContents.sendInputEvent({ type: 'mouseUp',   x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 })
+    // Небольшая пауза чтобы фокус успел перейти
+    await new Promise(r => setTimeout(r, 80))
+    await insertTextIntoView(activeView, text, x, y)
     return { ok: true }
   } catch (e) {
     return { ok: false, error: e.message }

@@ -838,25 +838,66 @@
       row.appendChild(actions)
     }
 
+    // ── Drag из файловой панели ──────────────────────────────────────────
+    // WebContentsView — отдельный процесс рендеринга, нативный OS-drag туда не попадает.
+    // Решение: при dragend над зоной webview читаем файл через IPC и вставляем текст
+    // через уже рабочий механизм pastePlainText (тот же что Ctrl+V).
+    const setupDrag = (isFolder) => {
+      row.draggable = true
+      row.addEventListener('dragstart', (e) => {
+        e.dataTransfer.effectAllowed = 'copy'
+        const sel = getSelectedPaths()
+        const paths = sel.length > 1 ? sel : [entry.path]
+        e.dataTransfer.setData('text/plain', paths[0])
+        window._draggingFilePaths = paths
+        window._draggingIsFolder = isFolder
+      })
+      row.addEventListener('dragend', async (e) => {
+        const paths = window._draggingFilePaths
+        const draggingIsFolder = window._draggingIsFolder
+        window._draggingFilePaths = null
+        window._draggingIsFolder = null
+        if (!paths || !paths.length) return
+
+        // Проверяем попал ли drop в зону WebContentsView
+        const panelW = state.filesPanelVisible ? state.filesPanelWidth : 0
+        const chromeH = 108 // TITLEBAR(36) + TOOLBAR(40) + TABBAR(32)
+        if (e.clientX <= panelW || e.clientY <= chromeH) return
+        if (!state.activeProfileId) return
+
+        for (const filePath of paths) {
+          let text
+          if (draggingIsFolder) {
+            // Папка — вставляем путь
+            text = filePath
+          } else {
+            // Файл — читаем содержимое
+            const res = await api.fsReadFile(filePath)
+            if (res && res.ok) {
+              text = res.content
+            } else {
+              // Если не удалось прочитать (бинарный файл и т.д.) — вставляем путь
+              text = filePath
+            }
+          }
+          // Вставляем по координатам курсора в webview.
+          // pasteAtCoords симулирует mouseClick чтобы перевести фокус,
+          // потом вставляет текст через executeJavaScript — надёжнее чем pastePlainText
+          // который вставляет только в document.activeElement (фокус был в файловой панели).
+          const viewX = Math.round(e.clientX - panelW)
+          const viewY = Math.round(e.clientY - chromeH)
+          await api.pasteAtCoords(text, viewX, viewY)
+        }
+      })
+    }
+
     if (kind === 'folder') {
       twisty.addEventListener('click', (e) => { e.stopPropagation(); toggleFolder(entry.path, row) })
       row.addEventListener('click', (e) => { selectRow(row, e.ctrlKey || e.metaKey); if (!e.ctrlKey && !e.metaKey) toggleFolder(entry.path, row) })
-      row.draggable = true
-      row.addEventListener('dragstart', (e) => {
-        e.preventDefault()
-        const sel = getSelectedPaths()
-        if (sel.length > 1) api.fsStartDragMultiple(sel)
-        else api.fsStartDrag(entry.path, true)
-      })
+      setupDrag(true)
     } else {
       row.addEventListener('click', (e) => { selectRow(row, e.ctrlKey || e.metaKey) })
-      row.draggable = true
-      row.addEventListener('dragstart', (e) => {
-        e.preventDefault()
-        const sel = getSelectedPaths()
-        if (sel.length > 1) api.fsStartDragMultiple(sel)
-        else api.fsStartDrag(entry.path, false)
-      })
+      setupDrag(false)
     }
 
     row.addEventListener('contextmenu', (e) => {
@@ -1270,6 +1311,11 @@
       if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i'))) {
         e.preventDefault()
         toggleDevTools()
+        return
+      }
+      if (e.key === 'F5') {
+        e.preventDefault()
+        state.activeTabId && api.navRefresh(state.activeProfileId, state.activeTabId)
         return
       }
       if (e.key === 'F11') {
