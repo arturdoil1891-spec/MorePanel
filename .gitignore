@@ -1,0 +1,34 @@
+node_modules/
+dist/
+build/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Application specific
+cache/
+logs/
+
+# Log files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Archives and executables
+*.zip
+*.7z
+*.tar.gz
+*.exe
+*.dmg
+*.AppImage
+
+# OS and IDE files
+.DS_Store
+.vscode/
+.idea/
+.llm-map/

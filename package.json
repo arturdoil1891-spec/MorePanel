@@ -1,0 +1,42 @@
+{
+  "name": "morelogin-browser-manager",
+  "version": "2.5.0",
+  "description": "MoreLogin Browser Manager — Electron 42 desktop client",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build-win": "electron-builder --win",
+    "build-mac": "electron-builder --mac",
+    "build-linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "dotenv": "^16.4.5",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "electron": "^42.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.morelogin.browser-manager",
+    "productName": "MoreLogin Browser Manager",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "package.json",
+      "README.md",
+      ".env.example"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}
