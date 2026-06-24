@@ -1,35 +1,471 @@
-# MoreLogin Browser Manager
+# MoreLogin Browser Manager — v2.7
 
-Desktop-приложение на Electron для работы с анти-детект браузером MoreLogin через Local API.
+Electron-приложение для работы с антидетект-браузером MoreLogin через Local API.  
+Имеет встроенную файловую панель и встроенный VS Code (через WSL + code-server) в правой панели.
 
-## Требования
+---
 
-- **Node.js 18+** (рекомендуется 20 LTS)
-- **npm** или **yarn**
-- **MoreLogin Desktop** с включённым Local API (по умолчанию `127.0.0.1:40000`)
-- **Windows 10/11**, **macOS 11+** или **Linux** (Ubuntu 20.04+)
+## Стек и версии
 
-## Установка
+| Компонент | Версия |
+|-----------|--------|
+| Electron | 42.x |
+| Node.js | 18+ (рекомендуется 20 LTS) |
+| code-server | 4.125.0 (через WSL) |
+| WSL | Ubuntu 26.04 LTS |
+| MoreLogin Desktop | Local API на `127.0.0.1:40000` |
 
-### 1. Клонировать или распаковать проект
+---
 
-```bash
-cd morelogin-browser-manager
+## Структура проекта
+
+```
+morelogin-browser-manager/
+├── main.js                  # Main process: окно, WebContentsView, IPC, профили, CDP, VS Code панель
+├── preload.js               # contextBridge: exposeInMainWorld('api', ...) — мост renderer↔main
+├── renderer.js              # Renderer process: весь UI — titlebar, tabs, файловая панель, VS Code панель
+├── index.html               # HTML разметка + весь CSS (inline, один файл)
+├── src/
+│   └── services/
+│       └── profileService.js  # Local API + Cloud API MoreLogin, кэш профилей, диагностика
+├── package.json
+├── .env                     # Переменные окружения (не коммитить)
+├── .env.example             # Шаблон .env
+└── README.md
 ```
 
-### 2. Установить зависимости
+---
+
+## Архитектура
+
+### Слои
+
+```
+┌─────────────────────────────────────────────────────┐
+│  BrowserWindow (index.html)                          │
+│  ┌─────────────┐  ┌──────────────┐                  │
+│  │  Titlebar   │  │   Toolbar    │  ← renderer.js   │
+│  ├─────────────┴──┴──────────────┤                  │
+│  │           Tabbar              │  ← renderer.js   │
+│  ├───────────────────┬───────────┤                  │
+│  │                   │           │                  │
+│  │  WebContentsView  │  VSCode   │  ← main.js       │
+│  │  (activeView)     │  Panel    │                  │
+│  │                   │ (vscode-  │                  │
+│  │  ← браузерные     │  View)    │                  │
+│  │    профили        │           │                  │
+│  └───────────────────┴───────────┘                  │
+│       ↑ filesPanelWidth    ↑ vscodePanelWidth        │
+└─────────────────────────────────────────────────────┘
+```
+
+### Константы хрома (main.js)
+
+```js
+TITLEBAR_HEIGHT = 32
+TOOLBAR_HEIGHT  = 36
+TABBAR_HEIGHT   = 28
+CHROME_HEIGHT   = 96  // сумма трёх
+```
+
+### Панели и bounds
+
+В `main.js` есть три зоны контента:
+
+- **Левая** — файловая панель (`filesPanelVisible`, `filesPanelWidth`, min=180, max=480, default=260)
+- **Центральная** — `activeView` (WebContentsView браузера) — занимает всё оставшееся место
+- **Правая** — VS Code панель (`vscodePanelVisible`, `vscodePanelWidth`, min=200, max=1200, default=500)
+
+`getContentBounds()` считает bounds для `activeView`:
+```js
+x = filesPanelVisible ? filesPanelWidth : 0
+width = windowWidth - left - (vscodePanelVisible ? vscodePanelWidth : 0)
+y = CHROME_HEIGHT
+height = windowHeight - CHROME_HEIGHT
+```
+
+`getVscodePanelBounds()` считает bounds для `vscodeView`:
+```js
+x = windowWidth - vscodePanelWidth
+width = vscodePanelWidth
+y = CHROME_HEIGHT
+height = windowHeight - CHROME_HEIGHT
+```
+
+---
+
+## Файлы — подробно
+
+### main.js (2200+ строк)
+
+**Глобальные переменные:**
+```js
+mainWindow          // BrowserWindow
+activeView          // WebContentsView текущей вкладки
+activeProfileId     // string
+filesPanelVisible   // bool
+filesPanelWidth     // number
+vscodePanelVisible  // bool (default: true)
+vscodePanelWidth    // number (default: 500)
+vscodeView          // WebContentsView для VS Code
+codeServerProcess   // child_process для WSL code-server
+profiles            // Map<id, profile>
+tabsByProfile       // Map<profileId, tab[]>
+```
+
+**Ключевые функции:**
+| Функция | Что делает |
+|---------|-----------|
+| `getContentBounds()` | Считает bounds для activeView с учётом обеих панелей |
+| `getVscodePanelBounds()` | Bounds для vscodeView |
+| `updateActiveViewBounds()` | Применяет bounds к activeView + вызывает updateVscodeViewBounds() |
+| `updateVscodeViewBounds()` | Применяет bounds к vscodeView |
+| `showView(view)` | Переключает активный WebContentsView |
+| `createView(partition)` | Создаёт WebContentsView с нужной сессией |
+| `attachViewShortcuts(view)` | Ctrl+W, Ctrl+T, Ctrl+Tab, F12, Ctrl+/-, F11 на уровне view |
+| `launchMLProfileFull()` | Запускает MoreLogin профиль: порт CDP → синк cookies → создаёт views |
+| `suspendProfile()` | Приостанавливает профиль: убивает views, сохраняет историю |
+| `resumeProfile()` | Возобновляет профиль |
+| `syncCookies()` | CDP → Electron session (при запуске профиля) |
+| `pushCookiesToML()` | Electron session → CDP (при suspend/close) |
+| `captureTabHistory()` | Снимок navigationHistory для восстановления |
+| `createWindow()` | Создаёт BrowserWindow, запускает WSL code-server, создаёт vscodeView |
+
+**IPC handlers (59 штук):**
+- `create-profile`, `switch-profile`, `remove-profile`, `stop-profile`, `list-profiles`
+- `new-tab`, `switch-tab`, `close-tab`, `reorder-tabs`
+- `navigate`, `nav-back`, `nav-forward`, `nav-refresh`
+- `set-files-panel-state`, `get-files-panel-state`
+- `overlay-visible`
+- `window-minimize`, `window-maximize`, `window-close`
+- `toggle-devtools`, `toggle-fullscreen`, `exit-fullscreen`, `get-devtools-state`, `get-fullscreen-state`
+- `ml:list`, `ml:import`, `ml:sync-cookies`, `ml:close`, `ml:relaunch`, `ml:test-connection`
+- `fs:list-folder`, `fs:pick-directory`, `fs:set-root`, `fs:get-root`
+- `fs:archive-folder`, `fs:archive-multiple`
+- `fs:start-drag-sync` (synchronous IPC)
+- `fs:get-folder-size`, `fs:insert-text-to-view`, `fs:read-file`, `fs:insert-to-view`
+- `fs:delete-paths`, `fs:reveal-in-folder`, `fs:open-path`, `fs:copy-path`
+- `get-settings`, `save-settings`, `reset-settings`
+- `paste-plain-text`, `paste-at-coords`
+- `run-diagnostics`
+- `vscode:set-panel-state`, `vscode:get-panel-state`, `vscode:load-url`, `vscode:get-url`
+- `vscode:set-zoom`, `vscode:get-zoom`
+- `browser:zoom-in`, `browser:zoom-out`, `browser:zoom-reset`
+
+**VS Code автозапуск (в ready-to-show):**
+```js
+codeServerProcess = spawn('wsl', ['code-server', '--port', '8080', '--auth', 'none', '--disable-telemetry'])
+// Затем tryLoad() — каждые 1с проверяет http://127.0.0.1:8080, до 30 попыток
+// При успехе: vscodeView.webContents.loadURL('http://localhost:8080')
+// При закрытии: codeServerProcess.kill()
+```
+
+---
+
+### preload.js (114 строк)
+
+Единственная точка входа renderer → main через `contextBridge`.
+
+**Экспортирует `window.api`:**
+```js
+// Профили
+createProfile, switchProfile, removeProfile, stopProfile, listProfiles
+
+// Вкладки
+newTab, switchTab, closeTab, reorderTabs
+
+// Навигация
+navigate, navBack, navForward, navRefresh
+
+// Окно
+minimize, maximize, close, overlayVisible
+
+// Настройки
+getSettings, saveSettings, resetSettings
+
+// MoreLogin API
+mlList, mlImport, mlSyncCookies, mlClose, mlRelaunch, mlList, testMLConnection
+
+// DevTools / Fullscreen
+toggleDevTools, toggleFullScreen, exitFullScreen, getDevToolsState, getFullScreenState
+
+// Файловая система
+// (вызываются из renderer через window.api.*)
+
+// VS Code панель
+vscodeSetPanelState(visible, width)
+vscodeGetPanelState()
+vscodeLoadUrl(url)
+vscodeGetUrl()
+vscodeSetZoom(factor)
+vscodeGetZoom()
+
+// Zoom браузера
+zoomIn, zoomOut, zoomReset
+
+// События (подписки)
+onTabUpdated, onTabOpened, onProfileUpdated, onProfileLaunched, onCookiesSynced, onMLListUpdated
+onShortcutCloseTab, onShortcutNextTab, onShortcutPrevTab, onShortcutFocusAddress, onShortcutNewTab
+
+// Прочее
+pastePlainText, pasteAtCoords, diagnostics
+```
+
+---
+
+### renderer.js (~1000 строк)
+
+Весь UI-код. Запускается в BrowserWindow (renderer process).
+
+**Структура:**
+```js
+// Состояние
+state = { profiles: [], activeProfileId, activeTabId }
+let vscodePanelVisible = true
+let vscodePanelWidth = 500
+let vscodeZoom = 1.0
+let mouseOverVscode = false  // для определения зоны Ctrl+/-
+
+// Ключевые функции
+renderProfiles()       // перерисовывает вкладки профилей в titlebar
+renderTabs()           // перерисовывает вкладки браузера в tabbar
+updateAddressBar()     // синхронизирует адресную строку
+autoLoadMLProfiles()   // загружает профили из MoreLogin при старте
+
+// VS Code панель
+applyVscodePanelLayout()  // обновляет CSS панели + вызывает IPC vscode:set-panel-state
+initVscodePanel()          // инициализирует все элементы VS Code панели
+
+// Сплиттер (splitter)
+// drag с throttle 16мс → sendSplitterIpc() → vscodeSetPanelState()
+// mouseup → applyVscodePanelLayout()
+
+// Zoom логика
+// mousemove → mouseOverVscode = e.clientX >= (window.innerWidth - vscodePanelWidth)
+// Ctrl+/-/0:
+//   mouseOverVscode → vscodeSetZoom()
+//   иначе         → window.api.zoomIn/Out/Reset()
+
+// Инициализация
+init()          // загружает профили, биндит кнопки
+initVscodePanel()
+```
+
+---
+
+### index.html (~1240 строк)
+
+Весь HTML и CSS в одном файле.
+
+**DOM-структура:**
+```html
+#titlebar
+  #titlebar-left          ← профили (динамически)
+  #titlebar-right
+    #btn-toggle-vscode    ← кнопка ⌨ (VS Code панель)
+    #btn-settings         ← ⚙
+    #window-controls      ← − □ ×
+
+#toolbar
+  #btn-back, #btn-forward, #btn-refresh
+  #address-bar
+  #active-profile-name
+  #btn-devtools
+
+#tabbar
+  #tab-strip              ← вкладки (динамически)
+  #new-tab-btn
+
+#overlay                  ← настройки (поверх всего)
+
+#vscode-splitter          ← полоска 5px, fixed, z-index:11
+#vscode-panel             ← правая панель VS Code
+  #vscode-panel-header
+    #vscode-zoom-info, #vscode-zoom-out, #vscode-zoom-reset, #vscode-zoom-in
+    #vscode-hide
+  #vscode-url-bar
+    #vscode-url-input
+    #vscode-go
+  #vscode-body            ← здесь vscodeView рендерится поверх (WebContentsView)
+
+#empty-state              ← заглушка когда нет профилей
+#splash                   ← загрузочный экран
+#ml-modal                 ← модал импорта профилей из MoreLogin
+#diag-modal               ← модал диагностики
+#status-bar               ← нижняя строка статуса
+```
+
+**Ключевые CSS-переменные:**
+```css
+#vscode-panel {
+  position: fixed;
+  top: 96px;   /* CHROME_HEIGHT */
+  right: 0;
+  width: 500px;
+  bottom: 0;
+  z-index: 10;
+}
+#vscode-splitter {
+  position: fixed;
+  width: 5px;
+  cursor: col-resize;
+  top: 96px;
+  bottom: 0;
+  z-index: 11;
+}
+```
+
+---
+
+### src/services/profileService.js
+
+Абстракция над MoreLogin API.
+
+**Методы:**
+- `getProfiles()` — получить список профилей (Local или Cloud API)
+- `getProfileDetail(envId)` — детали профиля (прокси и др.)
+- `getCachedProfiles()` — кэш без запроса
+- `updateSettings(settings)` — обновить настройки подключения
+- `runDiagnostics()` — проверка соединения с MoreLogin
+
+**API-режимы (`apiMode`):**
+- `auto` — сначала Local API, при ошибке — Cloud API
+- `local` — только Local API (`http://127.0.0.1:40000`)
+- `cloud` — только Cloud API (`https://api.morelogin.com`) с подписью MD5
+
+---
+
+## VS Code панель — детали реализации
+
+### Как работает
+
+1. При старте `createWindow()` → `ready-to-show`:
+   - `spawn('wsl', ['code-server', '--port', '8080', '--auth', 'none'])`
+   - Создаётся `vscodeView = new WebContentsView({ sandbox: false })`
+   - `mainWindow.contentView.addChildView(vscodeView)`
+   - `tryLoad(30)` — пингует `http://127.0.0.1:8080` каждую секунду
+   - При успехе: `vscodeView.webContents.loadURL('http://localhost:8080')`
+
+2. Размер `vscodeView` управляется через `updateVscodeViewBounds()`:
+   - Если `vscodePanelVisible = false` → `setBounds({x:0, y:0, width:1, height:1})` (скрыт)
+   - Если видим → `setBounds(getVscodePanelBounds())`
+
+3. Сплиттер (полоска между браузером и VS Code):
+   - `mousedown` → начало drag
+   - `mousemove` → меняет CSS + каждые 16мс шлёт IPC `vscode:set-panel-state`
+   - `mouseup` → финальный вызов `applyVscodePanelLayout()`
+   - Main process при получении IPC → `updateActiveViewBounds()` + `updateVscodeViewBounds()`
+
+4. Zoom:
+   - Определяется по `mouseOverVscode` (позиция курсора)
+   - VS Code: `vscodeView.webContents.setZoomFactor(factor)`
+   - Браузер: `activeView.webContents.setZoomFactor(factor)`
+
+### Горячие клавиши VS Code панели
+
+| Клавиша | Действие |
+|---------|---------|
+| `Ctrl+K` | Показать / скрыть VS Code панель |
+| `Ctrl+=` / `Ctrl++` | Увеличить масштаб (того окна где курсор) |
+| `Ctrl+-` | Уменьшить масштаб |
+| `Ctrl+0` | Сбросить масштаб |
+
+---
+
+## Установка и запуск
+
+### Требования
+
+- Node.js 18+ 
+- WSL (Windows Subsystem for Linux) с Ubuntu
+- code-server внутри WSL:
+  ```bash
+  wsl
+  curl -fsSL https://code-server.dev/install.sh | sh
+  ```
+
+### Запуск
 
 ```bash
 npm install
+npm start
 ```
 
-### 3. Настроить окружение
+code-server запускается автоматически через WSL при старте приложения.  
+VS Code появляется в правой панели через ~5-10 секунд (первый старт WSL).
+
+### Сборка
 
 ```bash
-cp .env.example .env
+npm run build-win    # → dist/*.exe
+npm run build-mac    # → dist/*.dmg
+npm run build-linux  # → dist/*.AppImage
 ```
 
-Содержимое `.env`:
+---
+
+## Состояние файлов (userData)
+
+| Файл | Содержимое |
+|------|-----------|
+| `app-state.json` | Профили, вкладки, активный профиль |
+| `app-settings.json` | Настройки (хост, порт, exclusions и др.) |
+| `window-state.json` | Размер и позиция окна, maximized |
+
+`userData` путь:
+- Windows: `%APPDATA%\morelogin-browser-manager`
+- macOS: `~/Library/Application Support/morelogin-browser-manager`
+- Linux: `~/.config/morelogin-browser-manager`
+
+---
+
+## Горячие клавиши (полный список)
+
+| Клавиша | Действие |
+|---------|---------|
+| `Ctrl+T` | Новая вкладка браузера |
+| `Ctrl+W` | Закрыть вкладку браузера |
+| `Ctrl+Tab` | Следующая вкладка |
+| `Ctrl+Shift+Tab` | Предыдущая вкладка |
+| `Ctrl+E` | Фокус на адресную строку |
+| `Ctrl+B` | Показать/скрыть файловую панель |
+| `Ctrl+K` | Показать/скрыть VS Code панель |
+| `Ctrl+=` | Увеличить масштаб активного окна |
+| `Ctrl+-` | Уменьшить масштаб активного окна |
+| `Ctrl+0` | Сбросить масштаб |
+| `F5` | Обновить вкладку |
+| `F11` | Полный экран |
+| `F12` / `Ctrl+Shift+I` | DevTools |
+| `Esc` | Закрыть настройки / модал / полный экран |
+
+---
+
+## Что можно улучшить / известные проблемы
+
+### Производительность
+- `tryLoad()` в `ready-to-show` — простой polling. Можно заменить на `child_process` stdout-парсинг (ждать строку `"HTTP server listening"`)
+- Во время drag сплиттера IPC идёт каждые 16мс — можно увеличить до 32мс если есть подтормаживания
+
+### VS Code панель
+- URL `http://localhost:8080` захардкожен. Можно вынести в `app-settings.json` и дать пользователю менять порт в настройках
+- Нет индикатора загрузки пока code-server стартует (панель просто пустая ~10 сек)
+- При закрытии приложения `codeServerProcess.kill()` убивает WSL-процесс, но сам WSL остаётся. Можно добавить `wsl --terminate` если нужно
+
+### Сессии и безопасность
+- `sandbox: false` у `vscodeView` — нужно для localhost, но снижает изоляцию. Можно попробовать `sandbox: true` с нужными permissions
+- IndexedDB не синхронизируется между MoreLogin Chrome и Electron-сессией
+
+### Файловая панель
+- Нет поиска по файлам
+- Нет превью файлов
+
+### Общее
+- Нет авто-обновления приложения
+- `repair.js` и `extract.js` в корне — непонятное назначение, стоит задокументировать или удалить
+
+---
+
+## Переменные окружения (.env)
 
 ```ini
 MORELOGIN_LOCAL_HOST=127.0.0.1
@@ -39,247 +475,26 @@ MORELOGIN_AUTO_LOAD=true
 MORELOGIN_HEADLESS_START=true
 MORELOGIN_DEBUG=false
 
-API_MODE=auto
-MORELOGIN_API_ID=your_api_id
-MORELOGIN_API_KEY=your_api_key
+API_MODE=auto              # auto | local | cloud
+MORELOGIN_API_ID=          # для Cloud API
+MORELOGIN_API_KEY=         # для Cloud API
 MORELOGIN_OPEN_API_URL=https://api.morelogin.com
 ```
 
-### 4. Запустить MoreLogin
-
-1. Откройте MoreLogin Desktop
-2. Перейдите в **Настройки → Local API** и убедитесь, что API включён
-3. Порт по умолчанию — `40000`. Если у вас другой — измените `MORELOGIN_LOCAL_PORT`
-
-### 5. Запустить приложение
-
-```bash
-npm start
-```
-
-## Сборка дистрибутива
-
-| Платформа | Команда               | Результат                        |
-| --------- | --------------------- | -------------------------------- |
-| Windows   | `npm run build-win`   | `.exe` (NSIS installer) в `dist/`|
-| macOS     | `npm run build-mac`   | `.dmg` в `dist/`                 |
-| Linux     | `npm run build-linux` | `.AppImage` в `dist/`            |
-
-## Использование
-
-### Интерфейс (минималистичный)
-
-Окно состоит из трёх тонких полос и рабочей области:
-
-- **Titlebar** (36px) — `≡` файлы · профили (пронумерованные вкладки) · `+` добавить · `↓` импорт из ML · счётчик профилей · `⚙` настройки · управление окном
-- **Toolbar** (40px) — `← → ↺` навигация · адресная строка · имя активного профиля · `⚡` DevTools
-- **Tabbar** (32px) — вкладки + инлайн-кнопка `+`
-- **Контент** — рабочая область браузера
-
-> Суммарная высота chrome — **108px**. Максимум пространства отдано содержимому.
-
-### Профили
-
-#### Создание локального профиля
-
-1. Нажмите **+** в titlebar
-2. Введите имя → профиль добавляется в список остановленным
-3. Кликните по нему — откроется вкладка `about:blank`
-
-#### Импорт из MoreLogin
-
-1. Нажмите **↓** в titlebar
-2. Выберите профиль из списка MoreLogin
-3. Профиль добавляется в список; браузер запустится при первом клике
-
-#### Закрытие профиля (кнопка ×)
-
-Нажатие **×** рядом с профилем **приостанавливает** его (сохраняет сессию, вкладки, историю), но **не удаляет** и **не закрывает браузер MoreLogin**. Профиль остаётся в списке со статусом ⏸ и запустится снова при следующем клике.
-
-#### Удаление профиля
-
-Правый клик на профиле → **1 — Удалить навсегда**. Браузер MoreLogin при этом **не закрывается** — вы управляете им из интерфейса MoreLogin самостоятельно.
-
-### Вкладки
-
-| Действие               | Способ                              |
-| ---------------------- | ----------------------------------- |
-| Новая вкладка          | **+** рядом с вкладками или `Ctrl+T`|
-| Переключение           | Клик по вкладке или `Ctrl+Tab`      |
-| Закрытие               | **×** на вкладке или `Ctrl+W`       |
-| Изменение порядка      | Drag-and-drop                       |
-| Открытие `target="_blank"` | Автоматически как новая вкладка |
-
-> `Ctrl+W` закрывает **вкладку браузера**, не всё приложение.
-
-### Suspend / Resume
-
-Профили, не активные более **2 минут**, приостанавливаются автоматически:
-
-- WebContentsView уничтожается
-- MoreLogin-профиль **не закрывается** (только Electron-сессия)
-- URL/title/история сохраняются
-- Индикатор ⏸ в titlebar
-
-При повторном клике профиль восстанавливается.
-
-### Панель файлов (IDE-стиль)
-
-Открыть/скрыть: `≡` в titlebar или `Ctrl+B`.
-
-#### Несколько директорий
-
-- Кнопка **+** в заголовке панели — добавить ещё одну папку
-- Кнопка **…** — заменить текущую корневую папку
-- При нескольких папках появляются вкладки-табы для переключения между ними
-- Крестик на вкладке — убрать директорию из панели (файлы не удаляются)
-
-#### Возможности
-
-| Действие                  | Способ                                    |
-| ------------------------- | ----------------------------------------- |
-| Выбрать файл / папку      | Клик                                      |
-| Выбрать несколько         | `Ctrl+клик`                               |
-| Перетащить в браузер      | Drag из панели → на страницу (как в проводнике) |
-| Архивировать              | Кнопка **⎌** рядом с папкой или контекстное меню |
-| Архивировать несколько    | `Ctrl+клик` → **⎌** на любом выбранном  |
-| Удалить                   | Кнопка **✕** или контекстное меню        |
-| Вес файла / папки         | Отображается справа в строке              |
-| Изменить ширину панели    | Drag правого края                         |
-
-**Контекстное меню** (правый клик):
-
-- Открыть в проводнике
-- Скопировать путь
-- Открыть в браузере (для файлов)
-- Архивировать в `.zip` (для папок / множественного выбора)
-- Удалить
-- Открыть через систему
-
-Архивация исключает `node_modules`, `.git`, `dist`, `build` и др. (настраивается в ⚙️).
-
-### Настройки (⚙ в titlebar)
-
-Открывает оверлей поверх активной вкладки. Доступные поля:
-
-- **Хост** / **Порт** — адрес MoreLogin Local API
-- **Размер страницы** — сколько профилей запрашивать за раз
-- **Автозапуск** — подтягивать профили из MoreLogin при старте
-- **Запуск в headless** — не показывать окно MoreLogin
-- **Отладка** — подробные логи (DevTools main-окна открываются только если `MORELOGIN_DEBUG=true`)
-- **Режим API** — Auto / Local / Cloud
-- **API ID / KEY** — для Cloud API
-- **Исключения архивации** — список имён, пропускаемых при создании `.zip`
-
-Кнопки: **Сохранить** · **Проверить соединение** · **Diagnostics** · **Сбросить**
-
-### DevTools
-
-Кнопка **⚡** в toolbar или `F12` / `Ctrl+Shift+I`. Открывает DevTools активной вкладки в отдельном окне; главное окно переходит в режим «поверх всех окон».
-
-### Полноэкранный режим
-
-`F11` — войти / выйти. `Esc` — выйти. В полноэкранном режиме titlebar скрывается полностью.
-
-## Горячие клавиши
-
-| Сочетание              | Действие                                   |
-| ---------------------- | ------------------------------------------ |
-| `Ctrl+T`               | Новая вкладка                              |
-| `Ctrl+W`               | Закрыть текущую вкладку браузера           |
-| `Ctrl+Tab`             | Следующая вкладка                          |
-| `Ctrl+Shift+Tab`       | Предыдущая вкладка                         |
-| `Ctrl+E`               | Фокус на адресную строку                   |
-| `Ctrl+B`               | Показать / скрыть файловую панель          |
-| `F12` / `Ctrl+Shift+I` | Открыть / закрыть DevTools                 |
-| `F11`                  | Войти / выйти из полного экрана            |
-| `Esc`                  | Закрыть модал / настройки / полный экран   |
-
-## Структура файлов состояния
-
-| Путь                               | Содержимое                   |
-| ---------------------------------- | ---------------------------- |
-| `<userData>/app-state.json`        | Профили, вкладки, активный   |
-| `<userData>/app-settings.json`     | Пользовательские настройки   |
-| `<userData>/window-state.json`     | Размер и позиция окна        |
-| `<userData>/Local Storage/leveldb` | Сессии Electron              |
-| `<userData>/Network/Cookies`       | Cookies (по профилям)        |
-
-`<userData>`:
-- **Windows:** `%APPDATA%/morelogin-browser-manager`
-- **macOS:** `~/Library/Application Support/morelogin-browser-manager`
-- **Linux:** `~/.config/morelogin-browser-manager`
-
-## Безопасность
-
-- `contextIsolation` включена, `nodeIntegration` отключён на всех WebContentsView
-- Sandbox включён
-- Каждый MoreLogin-профиль изолирован в сессии `persist:ml-<envId>`
-- Cookies и localStorage копируются через CDP только при запуске профиля
-- IPC работает только через `contextBridge` (`preload.js`)
-
-## Известные ограничения
-
-- IndexedDB не копируется автоматически (cookies + localStorage достаточно для большинства случаев)
-- На Linux могут потребоваться дополнительные зависимости для Electron
-
-## Лицензия
-
-MIT
-
 ---
 
-## Структура проекта
+## Зависимости
 
+```json
+{
+  "dependencies": {
+    "archiver": "^7.0.1",   // создание ZIP архивов
+    "dotenv": "^16.4.5",    // .env поддержка
+    "ws": "^8.21.0"         // WebSocket для CDP
+  },
+  "devDependencies": {
+    "electron": "^42.0.0",
+    "electron-builder": "^26.15.3"
+  }
+}
 ```
-morelogin-browser-manager/
-├── main.js              # main process (BrowserWindow, IPC, профили, CDP)
-├── preload.js           # bridge: contextBridge.exposeInMainWorld('api', ...)
-├── renderer.js          # логика UI: titlebar, tabs, file tree, settings
-├── index.html           # разметка + CSS (всё inline)
-├── src/
-│   └── services/
-│       └── profileService.js  # Local + Cloud API MoreLogin, кэш, диагностика
-├── package.json
-├── .env                 # MORELOGIN_* переменные
-└── .env.example         # шаблон (без реальных ключей)
-```
-
----
-
-## История изменений
-
-### v2.6 (2026-06-23)
-
-**Интерфейс**
-- ✅ **Минимализм** — Chrome уменьшен до 108px (было 116px): toolbar 40px, tabbar 32px. Убраны все лишние иконки и дубли кнопок
-- ✅ **⚙ Настройки** перенесены в titlebar-right (всегда видны, не занимают место в toolbar)
-- ✅ **⚡ DevTools** кнопка в toolbar (меньше, компактнее)
-- ✅ **Кнопка + новой вкладки** — инлайн рядом с вкладками, не в углу страницы
-- ✅ **Окно запоминает** размер, позицию и состояние maximize между сессиями
-
-**Профили**
-- ✅ **Кнопка × на профиле** — приостанавливает (stop) профиль с сохранением сессии, а не удаляет
-- ✅ **Профили MoreLogin не закрываются** при завершении в Electron — управление браузером остаётся на стороне MoreLogin
-
-**Горячие клавиши**
-- ✅ `Ctrl+W` — закрывает **вкладку браузера** (не приложение)
-- ✅ `Ctrl+Tab` / `Ctrl+Shift+Tab` — переключение между вкладками
-- ✅ `Ctrl+E` — фокус на адресную строку
-- ✅ `Ctrl+T` — новая вкладка
-
-**Файловая панель**
-- ✅ **Несколько директорий** — кнопка **+** добавляет папку; при нескольких появляются табы для переключения
-- ✅ Удаление директории из панели не удаляет файлы
-- ✅ IDE-стиль drag-and-drop, вес файлов/папок, Ctrl+клик для множественного выбора
-
-**Прочее**
-- ✅ **DevTools не открываются автоматически** — только если `MORELOGIN_DEBUG=true`
-- ✅ Вставка текста как plain text (Markdown-совместимая — без лишнего форматирования)
-
-### v2.5-fixed (2026-06-23)
-
-- ✅ Авторизация для MoreLogin Open API (X-Api-Id, X-Nonce-Id, Authorization MD5)
-- ✅ Исправлен баг `#diag-modal` (display: none по умолчанию)
-- ✅ Автозагрузка профилей из MoreLogin при старте + splash-экран
-- ✅ DevTools main-окна только при `MORELOGIN_DEBUG=true`

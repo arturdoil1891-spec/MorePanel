@@ -92,7 +92,19 @@ contextBridge.exposeInMainWorld('api', {
   onShortcutNewTab: (cb) => {
     const l = () => cb(); ipcRenderer.on('shortcut-new-tab', l)
     return () => ipcRenderer.removeListener('shortcut-new-tab', l)
-  }
+  },
+
+  // VS Code panel
+  vscodeSetPanelState: (visible, width) => ipcRenderer.invoke('vscode:set-panel-state', { visible, width }),
+  vscodeGetPanelState: () => ipcRenderer.invoke('vscode:get-panel-state'),
+  vscodeLoadUrl: (url) => ipcRenderer.invoke('vscode:load-url', url),
+  vscodeGetUrl: () => ipcRenderer.invoke('vscode:get-url'),
+  vscodeSetZoom: (factor) => ipcRenderer.invoke('vscode:set-zoom', factor),
+  vscodeGetZoom: () => ipcRenderer.invoke('vscode:get-zoom'),
+
+  zoomIn: () => ipcRenderer.invoke('browser:zoom-in'),
+  zoomOut: () => ipcRenderer.invoke('browser:zoom-out'),
+  zoomReset: () => ipcRenderer.invoke('browser:zoom-reset')
 })
 
 contextBridge.exposeInMainWorld(

@@ -3,6 +3,7 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const http = require('http')
+const { spawn } = require('child_process')
 const WebSocket = require('ws')
 const archiver = require('archiver')
 require('dotenv').config()
@@ -18,6 +19,9 @@ const CHROME_HEIGHT = TITLEBAR_HEIGHT + TOOLBAR_HEIGHT + TABBAR_HEIGHT
 const FILES_PANEL_DEFAULT_WIDTH = 260
 const FILES_PANEL_MIN_WIDTH = 180
 const FILES_PANEL_MAX_WIDTH = 480
+const VSCODE_PANEL_DEFAULT_WIDTH = 500
+const VSCODE_PANEL_MIN_WIDTH = 200
+const VSCODE_PANEL_MAX_WIDTH = 1200
 const SUSPEND_TIMEOUT = 2 * 60 * 1000
 const ARCHIVE_LEVEL = 9
 const DEFAULT_EXCLUSIONS = [
@@ -33,6 +37,10 @@ let activeView = null
 let activeProfileId = null
 let filesPanelVisible = false
 let filesPanelWidth = FILES_PANEL_DEFAULT_WIDTH
+let vscodePanelVisible = true
+let vscodePanelWidth = VSCODE_PANEL_DEFAULT_WIDTH
+let vscodeView = null  // WebContentsView для VS Code
+let codeServerProcess = null
 let filesPanelRoot = null
 let overlayVisible = false
 let devtoolsOpen = false
@@ -273,21 +281,44 @@ function getContentBounds() {
   if (!mainWindow) return { x: 0, y: 0, width: 1, height: 1 }
   const [w, h] = mainWindow.getContentSize()
   const left = filesPanelVisible ? filesPanelWidth : 0
+  const right = vscodePanelVisible ? vscodePanelWidth : 0
   return {
     x: left,
     y: CHROME_HEIGHT,
-    width: Math.max(w - left, 100),
+    width: Math.max(w - left - right, 100),
     height: Math.max(h - CHROME_HEIGHT, 100)
   }
+}
+
+function getVscodePanelBounds() {
+  if (!mainWindow) return { x: 0, y: 0, width: 1, height: 1 }
+  const [w, h] = mainWindow.getContentSize()
+  return {
+    x: w - vscodePanelWidth,
+    y: CHROME_HEIGHT,
+    width: vscodePanelWidth,
+    height: Math.max(h - CHROME_HEIGHT, 100)
+  }
+}
+
+function updateVscodeViewBounds() {
+  if (!vscodeView || vscodeView.webContents.isDestroyed()) return
+  if (!vscodePanelVisible) {
+    vscodeView.setBounds({ x: 0, y: 0, width: 1, height: 1 })
+    return
+  }
+  vscodeView.setBounds(getVscodePanelBounds())
 }
 
 function updateActiveViewBounds() {
   if (!activeView || activeView.webContents.isDestroyed()) return
   if (overlayVisible) {
     activeView.setBounds({ x: 0, y: 0, width: 1, height: 1 })
+    updateVscodeViewBounds()
     return
   }
   activeView.setBounds(getContentBounds())
+  updateVscodeViewBounds()
 }
 
 function showView(view) {
@@ -991,6 +1022,44 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     if (ws.maximized) mainWindow.maximize()
     mainWindow.show()
+
+    // Start code-server via WSL
+    try {
+      codeServerProcess = spawn('wsl', [
+        'code-server', '--port', '8080', '--auth', 'none', '--disable-telemetry'
+      ], { detached: false, stdio: 'ignore' })
+      codeServerProcess.on('error', (e) => {
+        if (settings.debugLogs) console.error('code-server spawn error:', e.message)
+      })
+    } catch (e) {
+      if (settings.debugLogs) console.error('code-server start failed:', e.message)
+    }
+
+    // Create VS Code WebContentsView
+    vscodeView = new WebContentsView({
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false
+      }
+    })
+    try { mainWindow.contentView.addChildView(vscodeView) } catch (e) {}
+    updateVscodeViewBounds()
+
+    // Wait for code-server to start then load
+    const tryLoad = (attempts) => {
+      http.get('http://127.0.0.1:8080', (res) => {
+        if (res.statusCode < 500) {
+          vscodeView.webContents.loadURL('http://localhost:8080')
+        } else if (attempts > 0) {
+          setTimeout(() => tryLoad(attempts - 1), 1000)
+        }
+        res.resume()
+      }).on('error', () => {
+        if (attempts > 0) setTimeout(() => tryLoad(attempts - 1), 1000)
+      })
+    }
+    setTimeout(() => tryLoad(30), 1000)
   })
 
   console.log('[Main] Window created');
@@ -1172,6 +1241,11 @@ app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) creat
 app.on('before-quit', () => {
   saveWindowState()
   saveAppStateNow()
+  // Kill code-server on exit
+  if (codeServerProcess) {
+    try { codeServerProcess.kill() } catch (e) {}
+    codeServerProcess = null
+  }
   // Close all running MoreLogin browser profiles so no orphan processes remain
   for (const profile of profiles.values()) {
     if (profile.envId && profile.debugPort && !profile.suspended) {
@@ -2087,3 +2161,62 @@ ipcMain.handle('exit-fullscreen', async () => {
 
 ipcMain.handle('get-devtools-state', async () => devtoolsOpen)
 ipcMain.handle('get-fullscreen-state', async () => isFullscreen)
+
+// ====== VS CODE PANEL ======
+
+ipcMain.handle('vscode:set-panel-state', async (_e, { visible, width }) => {
+  vscodePanelVisible = !!visible
+  if (typeof width === 'number') {
+    vscodePanelWidth = Math.max(VSCODE_PANEL_MIN_WIDTH, Math.min(VSCODE_PANEL_MAX_WIDTH, width))
+  }
+  // vscodeView already created at startup - just update bounds
+  updateActiveViewBounds()
+  updateVscodeViewBounds()
+  return { visible: vscodePanelVisible, width: vscodePanelWidth }
+})
+
+ipcMain.handle('vscode:get-panel-state', async () => ({
+  visible: vscodePanelVisible,
+  width: vscodePanelWidth
+}))
+
+ipcMain.handle('vscode:load-url', async (_e, url) => {
+  if (!vscodeView || vscodeView.webContents.isDestroyed()) {
+    return { ok: false, error: 'vscodeView not created' }
+  }
+  try {
+    await vscodeView.webContents.loadURL(url)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.handle('vscode:get-url', async () => {
+  if (!vscodeView || vscodeView.webContents.isDestroyed()) return { url: null }
+  return { url: vscodeView.webContents.getURL() }
+})
+ipcMain.handle('vscode:set-zoom', async (_e, factor) => {
+  if (!vscodeView || vscodeView.webContents.isDestroyed()) return { ok: false }
+  vscodeView.webContents.setZoomFactor(Math.max(0.3, Math.min(3.0, factor)))
+  return { ok: true }
+})
+
+ipcMain.handle('vscode:get-zoom', async () => {
+  if (!vscodeView || vscodeView.webContents.isDestroyed()) return { zoom: 1.0 }
+  return { zoom: vscodeView.webContents.getZoomFactor() }
+})
+
+// Zoom main browser view from renderer
+ipcMain.handle('browser:zoom-in', async () => {
+  if (!activeView || activeView.webContents.isDestroyed()) return
+  activeView.webContents.setZoomFactor(Math.min(activeView.webContents.getZoomFactor() + 0.1, 5.0))
+})
+ipcMain.handle('browser:zoom-out', async () => {
+  if (!activeView || activeView.webContents.isDestroyed()) return
+  activeView.webContents.setZoomFactor(Math.max(activeView.webContents.getZoomFactor() - 0.1, 0.1))
+})
+ipcMain.handle('browser:zoom-reset', async () => {
+  if (!activeView || activeView.webContents.isDestroyed()) return
+  activeView.webContents.setZoomFactor(1.0)
+})

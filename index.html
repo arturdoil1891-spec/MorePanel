@@ -942,6 +942,106 @@
     ::-webkit-scrollbar-track {
       background: transparent;
     }
+
+    /* ===== VS CODE PANEL ===== */
+    #vscode-panel {
+      position: fixed;
+      top: 96px; /* CHROME_HEIGHT */
+      right: 0;
+      width: 500px;
+      bottom: 0;
+      background: #1e1e1e;
+      display: flex;
+      flex-direction: column;
+      z-index: 10;
+      border-left: 1px solid #333;
+      transition: none;
+    }
+    #vscode-panel.hidden {
+      display: none;
+    }
+    #vscode-panel-header {
+      height: 32px;
+      background: #252526;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px;
+      flex-shrink: 0;
+      border-bottom: 1px solid #333;
+    }
+    #vscode-panel-header span {
+      font-size: 12px;
+      color: #aaa;
+      font-weight: 500;
+    }
+    #vscode-panel-header-controls {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .vscode-ctrl-btn {
+      background: transparent;
+      border: none;
+      color: #aaa;
+      cursor: pointer;
+      padding: 2px 6px;
+      font-size: 14px;
+      border-radius: 3px;
+      line-height: 1;
+    }
+    .vscode-ctrl-btn:hover {
+      background: #3c3c3c;
+      color: #fff;
+    }
+    #vscode-url-bar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      background: #252526;
+      border-bottom: 1px solid #2d2d2d;
+      flex-shrink: 0;
+    }
+    #vscode-url-input {
+      flex: 1;
+      background: #3c3c3c;
+      border: 1px solid #555;
+      color: #ccc;
+      padding: 2px 6px;
+      font-size: 12px;
+      border-radius: 3px;
+      outline: none;
+      font-family: inherit;
+    }
+    #vscode-url-input:focus {
+      border-color: #007acc;
+    }
+    #vscode-body {
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+    #vscode-splitter {
+      position: fixed;
+      width: 5px;
+      cursor: col-resize;
+      background: transparent;
+      z-index: 11;
+      top: 96px;
+      bottom: 0;
+    }
+    #vscode-splitter:hover,
+    #vscode-splitter.dragging {
+      background: #007acc55;
+    }
+    #vscode-zoom-info {
+      font-size: 11px;
+      color: #666;
+      padding: 0 4px;
+      min-width: 36px;
+      text-align: center;
+    }
   </style>
 </head>
 
@@ -950,6 +1050,7 @@
   <div id="titlebar">
     <div id="titlebar-left"></div>
     <div id="titlebar-right">
+      <button class="tb-btn icon" id="btn-toggle-vscode" title="VS Code панель (Ctrl+K)">⌨</button>
       <button class="tb-btn icon" id="btn-settings" title="Настройки">⚙</button>
       <div id="window-controls">
         <button class="wc-btn" id="btn-min" title="Свернуть">−</button>
@@ -1102,6 +1203,34 @@ dist"></textarea>
       </div>
       <div id="diag-modal-content"
         style="padding:16px; font-family:monospace; white-space:pre-wrap; color:#0f0; background:#000; height:400px; overflow-y:auto;">
+      </div>
+    </div>
+  </div>
+
+  <!-- VS Code splitter (полоска для resize) -->
+  <div id="vscode-splitter"></div>
+
+  <!-- Правая панель VS Code -->
+  <div id="vscode-panel">
+    <div id="vscode-panel-header">
+      <span>⌨ VS Code</span>
+      <div id="vscode-panel-header-controls">
+        <span id="vscode-zoom-info">100%</span>
+        <button class="vscode-ctrl-btn" id="vscode-zoom-out" title="Уменьшить (Ctrl+-)">−</button>
+        <button class="vscode-ctrl-btn" id="vscode-zoom-reset" title="Сбросить (Ctrl+0)">↺</button>
+        <button class="vscode-ctrl-btn" id="vscode-zoom-in" title="Увеличить (Ctrl+=)">+</button>
+        <button class="vscode-ctrl-btn" id="vscode-hide" title="Скрыть панель">✕</button>
+      </div>
+    </div>
+    <div id="vscode-url-bar">
+      <input id="vscode-url-input" type="text" placeholder="http://localhost:8080 (URL для VS Code web)" spellcheck="false">
+      <button class="vscode-ctrl-btn" id="vscode-go" title="Перейти">▶</button>
+    </div>
+    <div id="vscode-body">
+      <!-- WebContentsView от main.js отображается поверх этого div -->
+      <div style="padding:20px;color:#666;font-size:13px;text-align:center;margin-top:60px;">
+        Введите URL VS Code сервера выше<br>
+        <small style="color:#444;margin-top:8px;display:block;">Например: http://localhost:8080<br>(code-server или VS Code Tunnels)</small>
       </div>
     </div>
   </div>

@@ -9,6 +9,13 @@
     overlayVisible: false
   }
 
+  // VS Code panel state
+  let vscodePanelVisible = true
+  let vscodePanelWidth = 500
+  let vscodeZoom = 1.0
+  const VSCODE_MIN_WIDTH = 200
+  const VSCODE_MAX_WIDTH = 1200
+
   const $ = (id) => document.getElementById(id)
 
   function el(tag, attrs = {}, ...children) {
@@ -652,6 +659,181 @@
     if (res) $('address-bar').value = res.url
   }
 
+  function applyVscodePanelLayout() {
+    const panel = document.getElementById('vscode-panel')
+    const splitter = document.getElementById('vscode-splitter')
+    if (!panel || !splitter) return
+    if (vscodePanelVisible) {
+      panel.classList.remove('hidden')
+      panel.style.width = vscodePanelWidth + 'px'
+      splitter.style.right = vscodePanelWidth + 'px'
+      splitter.style.display = 'block'
+    } else {
+      panel.classList.add('hidden')
+      splitter.style.display = 'none'
+    }
+    // Сообщаем main process об изменении — он пересчитает bounds WebContentsView
+    if (window.api && window.api.vscodeSetPanelState) {
+      window.api.vscodeSetPanelState(vscodePanelVisible, vscodePanelWidth)
+    }
+  }
+
+  function initVscodePanel() {
+    const btnToggle = document.getElementById('btn-toggle-vscode')
+    const btnHide = document.getElementById('vscode-hide')
+    const splitter = document.getElementById('vscode-splitter')
+    const urlInput = document.getElementById('vscode-url-input')
+    const btnGo = document.getElementById('vscode-go')
+    const btnZoomIn = document.getElementById('vscode-zoom-in')
+    const btnZoomOut = document.getElementById('vscode-zoom-out')
+    const btnZoomReset = document.getElementById('vscode-zoom-reset')
+    const zoomInfo = document.getElementById('vscode-zoom-info')
+
+    // Восстановить состояние из main
+    if (window.api && window.api.vscodeGetPanelState) {
+      window.api.vscodeGetPanelState().then(s => {
+        if (s) {
+          vscodePanelVisible = s.visible
+          vscodePanelWidth = s.width || 500
+          applyVscodePanelLayout()
+        }
+      })
+    }
+
+    // Кнопка в тайтлбаре
+    if (btnToggle) {
+      btnToggle.addEventListener('click', () => {
+        vscodePanelVisible = !vscodePanelVisible
+        applyVscodePanelLayout()
+      })
+    }
+
+    // Кнопка скрыть в заголовке панели
+    if (btnHide) {
+      btnHide.addEventListener('click', () => {
+        vscodePanelVisible = false
+        applyVscodePanelLayout()
+      })
+    }
+
+    // URL bar — перейти
+    const goToUrl = () => {
+      const url = (urlInput && urlInput.value.trim()) || ''
+      if (!url) return
+      let finalUrl = url
+      if (!/^https?:\/\//i.test(finalUrl)) finalUrl = 'http://' + finalUrl
+      if (window.api && window.api.vscodeLoadUrl) {
+        window.api.vscodeLoadUrl(finalUrl)
+      }
+    }
+    if (btnGo) btnGo.addEventListener('click', goToUrl)
+    if (urlInput) {
+      urlInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); goToUrl() }
+      })
+    }
+
+    // Масштаб
+    const updateZoomInfo = () => {
+      if (zoomInfo) zoomInfo.textContent = Math.round(vscodeZoom * 100) + '%'
+    }
+    const setZoom = (factor) => {
+      vscodeZoom = Math.max(0.3, Math.min(3.0, factor))
+      updateZoomInfo()
+      if (window.api && window.api.vscodeSetZoom) window.api.vscodeSetZoom(vscodeZoom)
+    }
+    if (btnZoomIn) btnZoomIn.addEventListener('click', () => setZoom(vscodeZoom + 0.1))
+    if (btnZoomOut) btnZoomOut.addEventListener('click', () => setZoom(vscodeZoom - 0.1))
+    if (btnZoomReset) btnZoomReset.addEventListener('click', () => setZoom(1.0))
+    updateZoomInfo()
+
+    // Splitter - drag to resize with live IPC throttle
+    if (splitter) {
+      let dragging = false
+      let startX = 0
+      let startWidth = 0
+      let ipcThrottle = null
+
+      const sendSplitterIpc = (w) => {
+        if (ipcThrottle) return
+        ipcThrottle = setTimeout(() => {
+          ipcThrottle = null
+          if (window.api && window.api.vscodeSetPanelState) {
+            window.api.vscodeSetPanelState(vscodePanelVisible, w)
+          }
+        }, 16)
+      }
+
+      splitter.addEventListener('mousedown', e => {
+        e.preventDefault()
+        dragging = true
+        startX = e.clientX
+        startWidth = vscodePanelWidth
+        splitter.classList.add('dragging')
+        document.body.style.cursor = 'col-resize'
+        document.body.style.userSelect = 'none'
+      })
+
+      document.addEventListener('mousemove', e => {
+        if (!dragging) return
+        const delta = startX - e.clientX
+        const newWidth = Math.max(VSCODE_MIN_WIDTH, Math.min(VSCODE_MAX_WIDTH, startWidth + delta))
+        vscodePanelWidth = newWidth
+        const panel = document.getElementById('vscode-panel')
+        if (panel) panel.style.width = newWidth + 'px'
+        splitter.style.right = newWidth + 'px'
+        sendSplitterIpc(newWidth)
+      })
+
+      document.addEventListener('mouseup', () => {
+        if (!dragging) return
+        dragging = false
+        splitter.classList.remove('dragging')
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+        if (ipcThrottle) { clearTimeout(ipcThrottle); ipcThrottle = null }
+        applyVscodePanelLayout()
+      })
+    }
+
+    // Track mouse position to know which window to zoom
+    let mouseOverVscode = false
+    document.addEventListener('mousemove', e => {
+      if (!vscodePanelVisible) { mouseOverVscode = false; return }
+      mouseOverVscode = e.clientX >= (window.innerWidth - vscodePanelWidth)
+    })
+
+    // Ctrl+K - toggle VS Code panel
+    // Ctrl+/-/0 - zoom the window under cursor
+    document.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'k' || e.key === 'K')) {
+        if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return
+        e.preventDefault()
+        vscodePanelVisible = !vscodePanelVisible
+        applyVscodePanelLayout()
+        return
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        if (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '0') {
+          e.preventDefault()
+          if (vscodePanelVisible && mouseOverVscode) {
+            // Zoom VS Code panel
+            if (e.key === '+' || e.key === '=') setZoom(vscodeZoom + 0.1)
+            else if (e.key === '-') setZoom(vscodeZoom - 0.1)
+            else if (e.key === '0') setZoom(1.0)
+          } else {
+            // Zoom main browser view
+            if (window.api) {
+              if (e.key === '+' || e.key === '=') window.api.zoomIn && window.api.zoomIn()
+              else if (e.key === '-') window.api.zoomOut && window.api.zoomOut()
+              else if (e.key === '0') window.api.zoomReset && window.api.zoomReset()
+            }
+          }
+        }
+      }
+    })
+  }
+
   async function init() {
     const data = await api.listProfiles()
     state.profiles = (data && data.profiles) || data || []
@@ -813,5 +995,6 @@
   }
 
   init()
+  initVscodePanel()
 
 })()
