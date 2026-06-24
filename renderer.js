@@ -1,11 +1,25 @@
 (() => {
 
+  console.log('[Renderer] Loaded');
+
+  window.addEventListener('DOMContentLoaded', () => {
+    console.log('DOM loaded');
+    console.log('window.api =', window.api);
+    if (window.diagnostics) {
+      console.log('window.diagnostics.ping() =', window.diagnostics.ping());
+    } else {
+      console.error('window.diagnostics is NOT available!');
+    }
+  });
+
   const api = window.api
 
   const state = {
     profiles: [],
     activeProfileId: null,
     activeTabId: null,
+    filesPanelVisible: false,
+    filesPanelWidth: 260,
     overlayVisible: false
   }
 
@@ -33,6 +47,19 @@
     return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
   }
 
+  function setShift() {
+    const w = state.filesPanelVisible ? state.filesPanelWidth : 0
+    document.documentElement.style.setProperty('--panel-w', w + 'px')
+    $('toolbar').classList.toggle('shifted', state.filesPanelVisible)
+    $('tabbar').classList.toggle('shifted', state.filesPanelVisible)
+    $('overlay').classList.toggle('shifted', state.filesPanelVisible)
+    $('files-panel').style.width = w + 'px'
+    api.setFilesPanelState(state.filesPanelVisible, w)
+  }
+
+  // Номер профиля "как в MoreLogin": берём готовое поле от бэкенда, если оно
+  // есть (number / seqNo / no), иначе — позиция в списке (fallback для локальных
+  // профилей без явного номера).
   function getProfileNumber(p, idx) {
     if (p.number != null) return p.number
     if (p.seqNo != null) return p.seqNo
@@ -43,7 +70,14 @@
   function renderProfiles() {
     const left = $('titlebar-left')
     left.innerHTML = ''
+    // Кнопка файловой панели в titlebar
+    left.appendChild(el('button', {
+      class: 'tb-btn icon',
+      onclick: toggleFilesPanel,
+      title: 'Файлы (Ctrl+B)'
+    }, '≡'))
 
+    // Сортировка по возрастанию номера профиля
     const ordered = state.profiles
       .map((p, idx) => ({ p, num: getProfileNumber(p, idx) }))
       .sort((a, b) => a.num - b.num)
@@ -67,10 +101,12 @@
         onclick: (e) => { if (!e.target.classList.contains('close')) selectProfile(p.id) },
         oncontextmenu: (e) => {
           e.preventDefault()
+          // Toggle red highlight on right-click; show menu only if not toggling
           const wasRed = p._redHighlight
           p._redHighlight = !p._redHighlight
+          // Re-render to update color immediately, then show menu only on non-highlight click
           renderProfiles()
-          if (!wasRed) return
+          if (!wasRed) return // first right-click just marks red, no menu
           showProfileMenu(p, e)
         }
       },
@@ -113,6 +149,7 @@
     box.appendChild(el('b', {}, String(running)))
   }
 
+  // Имя профиля показываем только рядом с адресной строкой — после его открытия
   function updateActiveProfileName() {
     const nameEl = $('active-profile-name')
     if (!nameEl) return
@@ -203,6 +240,7 @@
   }
 
   function showProfileMenu(p, evt) {
+    // Visual feedback: soft red highlight on right-click
     const allTabs = document.querySelectorAll('.profile-tab')
     allTabs.forEach(t => t.classList.remove('ctx-active'))
     if (evt && evt.currentTarget) evt.currentTarget.classList.add('ctx-active')
@@ -328,6 +366,12 @@
       state.activeTabId = newActive
     }
     renderTabs()
+  }
+
+  function toggleFilesPanel() {
+    state.filesPanelVisible = !state.filesPanelVisible
+    $('files-panel').classList.toggle('hidden', !state.filesPanelVisible)
+    setShift()
   }
 
   function toggleOverlay() {
@@ -457,12 +501,15 @@
     try {
       const rawRes = await api.diagnostics()
       const finalRes = { renderer: true, ...rawRes }
+
       log('\n--- DIAGNOSTICS RESULT ---')
       log(JSON.stringify(finalRes, null, 2))
-      const originalDiag = window.api.diagnostics
+
+      // Assign to window.api.diagnostics for manual console access as requested
+      const originalDiag = window.api.diagnostics;
       window.api.diagnostics = async () => {
-        const r = await originalDiag()
-        return { renderer: true, ...r }
+        const r = await originalDiag();
+        return { renderer: true, ...r };
       }
     } catch (e) {
       log('\n--- DIAGNOSTICS FATAL ERROR ---')
@@ -528,6 +575,9 @@
     $('ml-modal').classList.remove('visible')
   }
 
+  // ── Автозагрузка профилей из MoreLogin при старте (как в project1/mlInit) ──
+  // Показывает splash, грузит список профилей, автоматически импортирует новые
+  // (ещё не импортированные) — лениво, без запуска антидетект-браузера.
   function showSplash(title, desc) {
     const splash = $('splash')
     if (!splash) return
@@ -539,7 +589,6 @@
     if (skip) skip.style.display = 'none'
     splash.classList.add('visible')
   }
-
   function updateSplash(title, desc, errMsg) {
     if (title) $('splash-title').textContent = title
     if (desc !== undefined) $('splash-desc').textContent = desc
@@ -548,7 +597,6 @@
       if (err) { err.textContent = errMsg; err.style.display = 'block' }
     }
   }
-
   function hideSplash() {
     const splash = $('splash')
     if (splash) splash.classList.remove('visible')
@@ -561,9 +609,12 @@
     const port = cfg.mlPort || 40000
     const apiAddr = `${host}:${port}`
 
+    // Показываем splash только если есть смысл — если уже есть локальные профили с envId,
+    // всё равно пробежимся по списку ML, чтобы подтянуть новые.
     const hasExistingML = state.profiles.some((p) => p.envId)
     if (!hasExistingML) showSplash('Загрузка профилей MoreLogin…', `Подключаюсь к ${apiAddr}`)
 
+    // Резолвим skip
     const skipBtn = $('splash-skip')
     if (skipBtn) {
       skipBtn.style.display = 'inline-block'
@@ -595,6 +646,7 @@
       return
     }
 
+    // Авто-импорт тех, которых ещё нет
     const importedEnvIds = new Set(state.profiles.filter((p) => p.envId).map((p) => String(p.envId)))
     const toImport = mlProfiles.filter((p) => !importedEnvIds.has(String(p.envId)))
 
@@ -623,6 +675,7 @@
       updateSplash('Импорт профилей…', `OK: ${ok}, ошибок: ${fail} из ${toImport.length}`)
     }
 
+    // Если до этого не было активного профиля — выберем первый
     if (!state.activeProfileId && state.profiles.length) {
       state.activeProfileId = state.profiles[0].id
       state.activeTabId = state.profiles[0].activeTabId
@@ -640,6 +693,475 @@
     }
   }
 
+  function setupResize() {
+    const handle = $('files-panel-resize')
+    let dragging = false
+    let startX = 0
+    let startW = 0
+    handle.addEventListener('mousedown', (e) => {
+      dragging = true
+      startX = e.clientX
+      startW = state.filesPanelWidth
+      document.body.style.cursor = 'ew-resize'
+      e.preventDefault()
+    })
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return
+      state.filesPanelWidth = Math.max(180, Math.min(480, startW + (e.clientX - startX)))
+      setShift()
+    })
+    document.addEventListener('mouseup', () => {
+      if (dragging) { dragging = false; document.body.style.cursor = '' }
+    })
+  }
+
+  const fileTree = {
+    root: null,          // текущий активный корень
+    roots: [],           // список всех добавленных корней
+    expanded: new Set(),
+    cache: new Map(),
+    selectedPath: null,
+    selectedPaths: new Set(),
+    folderSizeCache: new Map()
+  }
+
+  function formatSize(bytes) {
+    if (typeof bytes !== 'number' || bytes < 0) return ''
+    if (bytes < 1024) return bytes + ' B'
+    const units = ['KB', 'MB', 'GB', 'TB']
+    let v = bytes / 1024
+    for (let i = 0; i < units.length; i++) {
+      if (v < 1024 || i === units.length - 1) return v.toFixed(v < 10 ? 1 : 0) + ' ' + units[i]
+      v /= 1024
+    }
+    return bytes + ' B'
+  }
+
+  function getDirName(p) {
+    if (!p) return ''
+    const parts = p.split(/[\\/]/).filter(Boolean)
+    return parts[parts.length - 1] || p
+  }
+
+  function getParentPath(p) {
+    if (!p) return null
+    const sep = p.includes('\\') ? '\\' : '/'
+    const parts = p.split(sep).filter(Boolean)
+    if (parts.length <= 1) return null
+    parts.pop()
+    return parts.join(sep)
+  }
+
+  function updateCrumbs(rootPath) {
+    const el = $('files-crumbs')
+    if (!rootPath) {
+      el.innerHTML = '<span>Корень не выбран</span>'
+      return
+    }
+    const sep = rootPath.includes('\\') ? '\\' : '/'
+    const parts = rootPath.split(sep).filter(Boolean)
+    let html = ''
+    let acc = rootPath.startsWith(sep) ? sep : (rootPath.includes(':') ? parts[0] + sep : '')
+    for (let i = (rootPath.match(/^[A-Za-z]:/) ? 1 : 0); i < parts.length; i++) {
+      if (i > (rootPath.match(/^[A-Za-z]:/) ? 1 : 0)) acc += sep
+      acc += parts[i]
+      const isLast = i === parts.length - 1
+      html += `<span class="${isLast ? 'cur' : ''}">${escapeHtml(parts[i])}</span>`
+      if (!isLast) html += '<span> / </span>'
+    }
+    el.innerHTML = html
+    el.title = rootPath
+  }
+
+  function setTreeEmpty(msg) {
+    const c = $('files-panel-content')
+    c.innerHTML = ''
+    const e = document.createElement('div')
+    e.className = 'tree-empty'
+    e.textContent = msg
+    c.appendChild(e)
+  }
+
+  function setTreeLoading() {
+    const c = $('files-panel-content')
+    c.innerHTML = '<div class="tree-loading">Загрузка...</div>'
+  }
+
+  function buildRow(entry, depth, kind) {
+    const row = document.createElement('div')
+    row.className = 'tree-row'
+    row.dataset.path = entry.path
+    row.dataset.kind = kind
+    row.dataset.depth = String(depth)
+    row.style.paddingLeft = (4 + depth * 14) + 'px'
+
+    const twisty = document.createElement('span')
+    twisty.className = 'twisty' + (kind === 'file' || (kind === 'folder' && !entry.hasChildren) ? ' leaf' : '')
+    twisty.textContent = kind === 'folder' ? (fileTree.expanded.has(entry.path) ? '▾' : '▸') : ''
+    row.appendChild(twisty)
+
+    const name = document.createElement('span')
+    name.className = 'name'
+    name.textContent = entry.name
+    name.title = entry.path
+    row.appendChild(name)
+
+    const sizeEl = document.createElement('span')
+    sizeEl.className = 'size'
+    if (kind === 'file' && typeof entry.size === 'number') {
+      sizeEl.textContent = formatSize(entry.size)
+    } else if (kind === 'folder') {
+      if (fileTree.folderSizeCache.has(entry.path)) {
+        sizeEl.textContent = formatSize(fileTree.folderSizeCache.get(entry.path))
+      } else {
+        sizeEl.textContent = '…'
+        api.fsGetFolderSize(entry.path).then(r => {
+          if (r.ok) {
+            fileTree.folderSizeCache.set(entry.path, r.size)
+            sizeEl.textContent = formatSize(r.size)
+          } else { sizeEl.textContent = '' }
+        }).catch(() => { sizeEl.textContent = '' })
+      }
+    }
+    row.appendChild(sizeEl)
+
+    if (kind === 'folder') {
+      const actions = document.createElement('span')
+      actions.className = 'actions-inline'
+      const arch = document.createElement('button')
+      arch.textContent = '⎌'
+      arch.title = 'Архивировать в .zip'
+      arch.addEventListener('click', (e) => {
+        e.stopPropagation()
+        const sel = getSelectedPaths()
+        if (sel.length > 1) archiveMultipleAction(sel)
+        else archiveFolderAction(entry.path)
+      })
+      actions.appendChild(arch)
+      const del = document.createElement('button')
+      del.textContent = '✕'
+      del.title = 'Удалить'
+      del.style.color = '#f48771'
+      del.addEventListener('click', (e) => {
+        e.stopPropagation()
+        const sel = getSelectedPaths()
+        const targets = sel.length > 1 ? sel : [entry.path]
+        if (!confirm(`Удалить ${targets.length} элем.?`)) return
+        api.fsDeletePaths(targets).then(() => refreshTree())
+      })
+      actions.appendChild(del)
+      row.appendChild(actions)
+    }
+
+    // ── Drag из файловой панели ──────────────────────────────────────────
+    // WebContentsView — отдельный процесс рендеринга, нативный OS-drag туда не попадает.
+    // Решение: при dragend над зоной webview читаем файл через IPC и вставляем текст
+    // через уже рабочий механизм pastePlainText (тот же что Ctrl+V).
+    const setupDrag = (isFolder) => {
+      row.draggable = true
+      row.addEventListener('dragstart', (e) => {
+        e.dataTransfer.effectAllowed = 'copy'
+        const sel = getSelectedPaths()
+        const paths = sel.length > 1 ? sel : [entry.path]
+        e.dataTransfer.setData('text/plain', paths[0])
+        window._draggingFilePaths = paths
+        window._draggingIsFolder = isFolder
+      })
+      row.addEventListener('dragend', async (e) => {
+        const paths = window._draggingFilePaths
+        const draggingIsFolder = window._draggingIsFolder
+        window._draggingFilePaths = null
+        window._draggingIsFolder = null
+        if (!paths || !paths.length) return
+
+        // Проверяем попал ли drop в зону WebContentsView
+        const panelW = state.filesPanelVisible ? state.filesPanelWidth : 0
+        const chromeH = 96 // TITLEBAR(32) + TOOLBAR(36) + TABBAR(28)
+        if (e.clientX <= panelW || e.clientY <= chromeH) return
+        if (!state.activeProfileId) return
+
+        for (const filePath of paths) {
+          // Always insert the file NAME (basename), not the full content.
+          // Full content insert only if user explicitly opens via context menu.
+          const fileName = filePath.split(/[\\/]/).pop() || filePath
+          const text = fileName
+          const viewX = Math.round(e.clientX - panelW)
+          const viewY = Math.round(e.clientY - chromeH)
+          await api.pasteAtCoords(text, viewX, viewY)
+        }
+      })
+    }
+
+    if (kind === 'folder') {
+      twisty.addEventListener('click', (e) => { e.stopPropagation(); toggleFolder(entry.path, row) })
+      row.addEventListener('click', (e) => { selectRow(row, e.ctrlKey || e.metaKey); if (!e.ctrlKey && !e.metaKey) toggleFolder(entry.path, row) })
+      setupDrag(true)
+    } else {
+      row.addEventListener('click', (e) => { selectRow(row, e.ctrlKey || e.metaKey) })
+      setupDrag(false)
+    }
+
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault()
+      if (!fileTree.selectedPaths.has(entry.path)) selectRow(row, e.ctrlKey || e.metaKey)
+      showFsContextMenu(e.clientX, e.clientY, entry, kind)
+    })
+
+    return row
+  }
+
+  function selectRow(row, ctrlKey) {
+    if (ctrlKey) {
+      const p = row.dataset.path
+      if (fileTree.selectedPaths.has(p)) {
+        fileTree.selectedPaths.delete(p)
+        row.classList.remove('selected')
+      } else {
+        fileTree.selectedPaths.add(p)
+        row.classList.add('selected')
+      }
+      fileTree.selectedPath = p
+    } else {
+      document.querySelectorAll('#files-panel-content .tree-row.selected').forEach((r) => r.classList.remove('selected'))
+      fileTree.selectedPaths.clear()
+      row.classList.add('selected')
+      fileTree.selectedPath = row.dataset.path
+      fileTree.selectedPaths.add(row.dataset.path)
+    }
+  }
+
+  function getSelectedPaths() {
+    return fileTree.selectedPaths.size > 0 ? Array.from(fileTree.selectedPaths) : (fileTree.selectedPath ? [fileTree.selectedPath] : [])
+  }
+
+  async function toggleFolder(folderPath, rowEl) {
+    if (fileTree.expanded.has(folderPath)) {
+      fileTree.expanded.delete(folderPath)
+      const children = rowEl.nextElementSibling
+      if (children && children.classList && children.classList.contains('tree-children')) children.remove()
+      const twisty = rowEl.querySelector('.twisty')
+      if (twisty) twisty.textContent = '▸'
+      const icon = rowEl.querySelector('.icon')
+      if (icon) icon.textContent = '📁'
+      return
+    }
+    await expandFolder(folderPath, rowEl)
+  }
+
+  async function expandFolder(folderPath, rowEl) {
+    const data = await loadFolder(folderPath)
+    if (!data) return
+    fileTree.expanded.add(folderPath)
+    const twisty = rowEl.querySelector('.twisty')
+    if (twisty) twisty.textContent = '▾'
+    const icon = rowEl.querySelector('.icon')
+    if (icon) icon.textContent = '📂'
+    const depth = parseInt(rowEl.dataset.depth, 10) + 1
+    const wrap = document.createElement('div')
+    wrap.className = 'tree-children'
+    for (const f of data.folders) wrap.appendChild(buildRow(f, depth, 'folder'))
+    for (const f of data.files) wrap.appendChild(buildRow(f, depth, 'file'))
+    rowEl.parentNode.insertBefore(wrap, rowEl.nextSibling)
+  }
+
+  async function loadFolder(folderPath) {
+    if (!folderPath) return null
+    if (fileTree.cache.has(folderPath)) return fileTree.cache.get(folderPath)
+    const res = await api.fsListFolder(folderPath)
+    if (!res.ok) {
+      setTreeEmpty('Ошибка: ' + (res.error || 'unknown'))
+      return null
+    }
+    fileTree.cache.set(folderPath, res)
+    return res
+  }
+
+  function renderRoot(rootPath, data) {
+    fileTree.expanded = new Set([rootPath])
+    fileTree.cache = new Map([[rootPath, data]])
+    const c = $('files-panel-content')
+    c.innerHTML = ''
+    for (const f of data.folders) c.appendChild(buildRow(f, 0, 'folder'))
+    for (const f of data.files) c.appendChild(buildRow(f, 0, 'file'))
+  }
+
+  async function refreshTree() {
+    if (!fileTree.root) return
+    setTreeLoading()
+    fileTree.cache.delete(fileTree.root)
+    fileTree.selectedPaths.clear()
+    fileTree.selectedPath = null
+    const data = await loadFolder(fileTree.root)
+    if (data) {
+      renderRoot(fileTree.root, data)
+      updateCrumbs(fileTree.root)
+    } else {
+      setTreeEmpty('Не удалось прочитать папку')
+    }
+  }
+
+  async function pickDirectory() {
+    await addDirectory()
+  }
+
+  async function archiveFolderAction(folderPath) {
+    const res = await api.fsArchiveFolder(folderPath, null)
+    if (!res.ok) alert('Ошибка архивации: ' + (res.error || 'unknown'))
+  }
+
+  async function archiveMultipleAction(paths) {
+    const res = await api.fsArchiveMultiple({ paths, destPath: null })
+    if (!res.ok) alert('Ошибка архивации: ' + (res.error || 'unknown'))
+  }
+
+  function hideFsContextMenu() {
+    const m = $('fs-context-menu')
+    m.classList.remove('visible')
+    m.innerHTML = ''
+  }
+
+  function showFsContextMenu(x, y, entry, kind) {
+    const m = $('fs-context-menu')
+    m.innerHTML = ''
+    const make = (label, cb) => {
+      const i = document.createElement('div')
+      i.className = 'item'
+      i.textContent = label
+      i.addEventListener('click', () => { hideFsContextMenu(); cb() })
+      m.appendChild(i)
+    }
+    const sep = () => { const s = document.createElement('div'); s.className = 'sep'; m.appendChild(s) }
+    const sel = getSelectedPaths()
+    const multi = sel.length > 1
+    make('Открыть в проводнике', () => api.fsRevealInFolder(entry.path))
+    make('Скопировать путь', () => api.fsCopyPath(entry.path))
+    if (kind === 'file' && !multi) make('Открыть в браузере', () => api.fsOpenPath(entry.path))
+    sep()
+    if (kind === 'folder' || multi) {
+      make(multi ? `Архивировать ${sel.length} элем.` : 'Архивировать в .zip', () => {
+        if (multi) archiveMultipleAction(sel)
+        else archiveFolderAction(entry.path)
+      })
+    }
+    make(multi ? `Удалить ${sel.length} элем.` : 'Удалить', async () => {
+      const targets = multi ? sel : [entry.path]
+      if (!confirm(`Удалить ${targets.length} элем.?`)) return
+      await api.fsDeletePaths(targets)
+      fileTree.selectedPaths.clear()
+      fileTree.selectedPath = null
+      await refreshTree()
+    })
+    if (!multi) { sep(); make('Открыть через систему', () => api.fsOpenPath(entry.path)) }
+
+    m.classList.add('visible')
+    const rect = m.getBoundingClientRect()
+    const maxX = window.innerWidth - rect.width - 4
+    const maxY = window.innerHeight - rect.height - 4
+    m.style.left = Math.min(x, maxX) + 'px'
+    m.style.top = Math.min(y, maxY) + 'px'
+  }
+
+  function renderRootTabs() {
+    const bar = $('files-roots-tabs')
+    if (!bar) return
+    if (fileTree.roots.length <= 1) { bar.style.display = 'none'; return }
+    bar.style.display = 'flex'
+    bar.innerHTML = ''
+    fileTree.roots.forEach((rootPath, idx) => {
+      const name = getDirName(rootPath)
+      const isActive = rootPath === fileTree.root
+      const tab = document.createElement('div')
+      tab.style.cssText = `display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:4px 4px 0 0;cursor:pointer;font-size:11px;background:${isActive ? '#2a2a2a' : '#1a1a1a'};color:${isActive ? '#fff' : '#888'};border:1px solid ${isActive ? '#3a3a3a' : 'transparent'};`
+      tab.textContent = name
+      tab.title = rootPath
+      tab.addEventListener('click', () => switchRoot(rootPath))
+      const rm = document.createElement('span')
+      rm.textContent = '×'
+      rm.style.cssText = 'opacity:0.5;cursor:pointer;padding:0 2px;'
+      rm.title = 'Удалить из панели'
+      rm.addEventListener('click', (e) => { e.stopPropagation(); removeRoot(rootPath) })
+      tab.appendChild(rm)
+      bar.appendChild(tab)
+    })
+  }
+
+  async function switchRoot(rootPath) {
+    fileTree.root = rootPath
+    fileTree.cache = new Map()
+    fileTree.selectedPaths.clear()
+    fileTree.selectedPath = null
+    const data = await loadFolder(rootPath)
+    if (data) { renderRoot(rootPath, data); updateCrumbs(rootPath) }
+    renderRootTabs()
+  }
+
+  function removeRoot(rootPath) {
+    fileTree.roots = fileTree.roots.filter(r => r !== rootPath)
+    if (fileTree.root === rootPath) {
+      if (fileTree.roots.length > 0) switchRoot(fileTree.roots[0])
+      else {
+        fileTree.root = null
+        $('files-panel-content').innerHTML = '<div class="tree-empty">Добавьте папку через + в заголовке</div>'
+        updateCrumbs(null)
+      }
+    }
+    renderRootTabs()
+  }
+
+  async function addDirectory() {
+    const res = await api.fsPickDirectory()
+    if (!res.ok) { if (!res.canceled) setTreeEmpty('Ошибка: ' + (res.error || 'unknown')); return }
+    if (!fileTree.roots.includes(res.path)) fileTree.roots.push(res.path)
+    fileTree.root = res.path
+    fileTree.cache.set(res.path, res)
+    renderRoot(res.path, res)
+    updateCrumbs(res.path)
+    renderRootTabs()
+  }
+
+  async function initFileTree() {
+    const r = await api.fsGetRoot()
+    if (r.ok && r.path && r.folder) {
+      fileTree.root = r.path
+      if (!fileTree.roots.includes(r.path)) fileTree.roots.push(r.path)
+      fileTree.expanded = new Set([r.path])
+      fileTree.cache = new Map([[r.path, r.folder]])
+      const c = $('files-panel-content')
+      c.innerHTML = ''
+      for (const f of r.folder.folders) c.appendChild(buildRow(f, 0, 'folder'))
+      for (const f of r.folder.files) c.appendChild(buildRow(f, 0, 'file'))
+      updateCrumbs(r.path)
+    }
+    $('btn-add-dir').onclick = addDirectory
+    $('btn-pick-dir').onclick = async () => {
+      // «Заменить» текущий корень на новую папку
+      const res = await api.fsPickDirectory()
+      if (!res.ok) { if (!res.canceled) setTreeEmpty('Ошибка: ' + (res.error || 'unknown')); return }
+      if (fileTree.root && !fileTree.roots.includes(res.path)) {
+        const idx = fileTree.roots.indexOf(fileTree.root)
+        if (idx !== -1) fileTree.roots[idx] = res.path
+        else fileTree.roots.push(res.path)
+      } else if (!fileTree.roots.includes(res.path)) {
+        fileTree.roots.push(res.path)
+      }
+      fileTree.root = res.path
+      fileTree.cache.set(res.path, res)
+      renderRoot(res.path, res)
+      updateCrumbs(res.path)
+      renderRootTabs()
+    }
+    $('btn-refresh-tree').onclick = refreshTree
+    $('btn-close-files').onclick = toggleFilesPanel
+    renderRootTabs()
+    document.addEventListener('click', (e) => {
+      const m = $('fs-context-menu')
+      if (!m.contains(e.target)) hideFsContextMenu()
+    })
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideFsContextMenu()
+    })
+  }
+
   async function navigate(url) {
     if (!state.activeProfileId || !state.activeTabId) return
     let u = url.trim()
@@ -653,6 +1175,14 @@
   }
 
   async function init() {
+    const fpState = await api.getFilesPanelState()
+    state.filesPanelVisible = fpState.visible
+    state.filesPanelWidth = fpState.width
+    if (state.filesPanelVisible) {
+      $('files-panel').classList.remove('hidden')
+    }
+    setShift()
+
     const data = await api.listProfiles()
     state.profiles = (data && data.profiles) || data || []
     state.activeProfileId = (data && data.activeProfileId) || (state.profiles[0] && state.profiles[0].id) || null
@@ -660,6 +1190,8 @@
     renderProfiles()
     renderTabs()
 
+    // ── Автозагрузка профилей из MoreLogin при старте (если включено) ──
+    // Берём конфиг из settings; если autoLoad === false — пропускаем.
     api.getSettings().then((cfg) => {
       if (cfg && cfg.autoLoad !== false) {
         autoLoadMLProfiles().catch((e) => console.error('autoLoadML:', e))
@@ -669,7 +1201,7 @@
     $('btn-min').onclick = () => api.minimize()
     $('btn-max').onclick = toggleFullScreen
     $('btn-close').onclick = () => api.close()
-    $('btn-settings').onclick = toggleOverlay
+    $('btn-settings').onclick = toggleOverlay  // теперь в titlebar-right
     const btnDevtools = $('btn-devtools')
     if (btnDevtools) btnDevtools.onclick = toggleDevTools
     $('btn-close-settings').onclick = toggleOverlay
@@ -751,8 +1283,12 @@
       }
     })
 
+    setupResize()
+    await initFileTree()
+
     api.onShortcutCloseTab(() => { if (state.activeTabId) closeTab(state.activeTabId) })
     api.onShortcutNewTab(() => newTab())
+    api.onShortcutToggleFiles(() => toggleFilesPanel())
     api.onShortcutFocusAddress(() => {
       const bar = $('address-bar')
       if (bar) { bar.focus(); bar.select() }
@@ -789,12 +1325,14 @@
         return
       }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
-        if (e.key === 't' || e.key === 'T') { e.preventDefault(); newTab() }
+        if (e.key === 'b' || e.key === 'B') { e.preventDefault(); toggleFilesPanel() }
+        else if (e.key === 't' || e.key === 'T') { e.preventDefault(); newTab() }
         else if (e.key === 'e' || e.key === 'E') {
           e.preventDefault()
           const bar = $('address-bar'); if (bar) { bar.focus(); bar.select() }
         }
         else if (e.key === 'w' || e.key === 'W') {
+          // Ctrl+W closes only the active browser tab, never the Electron window
           e.preventDefault()
           if (state.activeTabId) closeTab(state.activeTabId)
         }
@@ -814,4 +1352,4 @@
 
   init()
 
-})()
+})();

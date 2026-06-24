@@ -1,5 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
+console.log('[Preload] Loaded');
+
 contextBridge.exposeInMainWorld('api', {
   createProfile: (name) => ipcRenderer.invoke('create-profile', name),
   switchProfile: (id) => ipcRenderer.invoke('switch-profile', id),
@@ -17,7 +19,26 @@ contextBridge.exposeInMainWorld('api', {
   navForward: (profileId, tabId) => ipcRenderer.invoke('nav-forward', { profileId, tabId }),
   navRefresh: (profileId, tabId) => ipcRenderer.invoke('nav-refresh', { profileId, tabId }),
 
+  setFilesPanelState: (visible, width) => ipcRenderer.invoke('set-files-panel-state', { visible, width }),
+  getFilesPanelState: () => ipcRenderer.invoke('get-files-panel-state'),
   overlayVisible: (visible) => ipcRenderer.invoke('overlay-visible', visible),
+
+  fsListFolder: (folderPath) => ipcRenderer.invoke('fs:list-folder', folderPath),
+  fsPickDirectory: () => ipcRenderer.invoke('fs:pick-directory'),
+  fsSetRoot: (folderPath) => ipcRenderer.invoke('fs:set-root', folderPath),
+  fsGetRoot: () => ipcRenderer.invoke('fs:get-root'),
+  fsArchiveFolder: (folderPath, destPath) => ipcRenderer.invoke('fs:archive-folder', { folderPath, destPath }),
+  fsArchiveMultiple: ({ paths, destPath }) => ipcRenderer.invoke('fs:archive-multiple', { paths, destPath }),
+  fsRevealInFolder: (filePath) => ipcRenderer.invoke('fs:reveal-in-folder', filePath),
+  fsOpenPath: (filePath) => ipcRenderer.invoke('fs:open-path', filePath),
+  fsCopyPath: (filePath) => ipcRenderer.invoke('fs:copy-path', filePath),
+  fsStartDrag: (filePath, isFolder) => ipcRenderer.sendSync('fs:start-drag-sync', { filePath, isFolder }),
+  fsStartDragMultiple: (filePaths) => ipcRenderer.sendSync('fs:start-drag-sync', { filePaths, isFolder: false, multi: true }),
+  fsGetFolderSize: (folderPath) => ipcRenderer.invoke('fs:get-folder-size', folderPath),
+  fsDeletePaths: (paths) => ipcRenderer.invoke('fs:delete-paths', paths),
+  fsReadFile: (filePath) => ipcRenderer.invoke('fs:read-file', filePath),
+  fsInsertToView: (filePath, x, y) => ipcRenderer.invoke('fs:insert-to-view', { filePath, x, y }),
+  insertToView: (text, x, y) => ipcRenderer.invoke('fs:insert-text-to-view', { text, x, y }),
 
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (payload) => ipcRenderer.invoke('save-settings', payload),
@@ -92,6 +113,10 @@ contextBridge.exposeInMainWorld('api', {
   onShortcutNewTab: (cb) => {
     const l = () => cb(); ipcRenderer.on('shortcut-new-tab', l)
     return () => ipcRenderer.removeListener('shortcut-new-tab', l)
+  },
+  onShortcutToggleFiles: (cb) => {
+    const l = () => cb(); ipcRenderer.on('shortcut-toggle-files', l)
+    return () => ipcRenderer.removeListener('shortcut-toggle-files', l)
   }
 })
 
